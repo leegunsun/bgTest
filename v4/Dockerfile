@@ -12,9 +12,10 @@ COPY green-server/ ./green-server/
 COPY api-server/ ./api-server/
 COPY switch-deployment.sh ./switch-deployment.sh
 COPY health-check.sh ./health-check.sh
+COPY start.sh ./start.sh
 
 # 스크립트 실행 권한 부여
-RUN chmod +x ./switch-deployment.sh ./health-check.sh
+RUN chmod +x ./switch-deployment.sh ./health-check.sh ./start.sh
 
 # nginx 설정 디렉터리 생성 (새로운 판단 파일 구조)
 RUN mkdir -p /var/www/html /var/log/nginx /etc/nginx/conf.d
@@ -27,17 +28,5 @@ COPY admin.html /var/www/html/index.html
 # 포트 노출
 EXPOSE 80 8080 3001 3002 9000
 
-# 시작 스크립트 생성
-RUN echo '#!/bin/bash' > /app/start.sh && \
-    echo 'echo "Starting Blue Server..."' >> /app/start.sh && \
-    echo 'node /app/blue-server/app.js &' >> /app/start.sh && \
-    echo 'echo "Starting Green Server..."' >> /app/start.sh && \
-    echo 'node /app/green-server/app.js &' >> /app/start.sh && \
-    echo 'echo "Starting API Server..."' >> /app/start.sh && \
-    echo 'node /app/api-server/app.js &' >> /app/start.sh && \
-    echo 'echo "Starting Nginx..."' >> /app/start.sh && \
-    echo 'nginx -g "daemon off;" &' >> /app/start.sh && \
-    echo 'wait' >> /app/start.sh && \
-    chmod +x /app/start.sh
-
+# 컨테이너 시작 시 실행할 명령
 CMD ["/app/start.sh"]
