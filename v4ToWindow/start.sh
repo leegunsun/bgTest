@@ -1,5 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e  # 오류 시 스크립트 종료
+
+# 빌드 시 검증 요청 처리
+if [[ "${1:-}" == "--version" ]]; then
+    echo "Blue-Green Deployment System v1.0"
+    exit 0
+fi
 
 echo "🚀 Starting Blue-Green Deployment System..."
 
