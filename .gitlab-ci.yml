@@ -105,6 +105,10 @@ build-dev:
     # Docker 이미지 빌드 준비
     - echo "Preparing Docker build context..."
     - ls -al blue-server/ green-server/
+    - echo "🔍 Checking shell scripts for artifacts..."
+    - ls -la *.sh || echo "No .sh files found in build context"
+    - echo "📁 All files for artifacts:"
+    - ls -la
     
   artifacts:
     expire_in: 3 days
@@ -164,6 +168,12 @@ deploy-green-dev:
   script:
     - echo "Deploying to Docker-based Blue-Green environment..."
     
+    # 로컬 파일 확인 (디버깅)
+    - echo "🔍 Checking local files before transfer..."
+    - ls -la *.sh || echo "No .sh files found locally"
+    - echo "📁 Current directory contents:"
+    - ls -la
+    
     # 대상 디렉토리 생성 (없을 경우를 대비)
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
     
@@ -177,11 +187,17 @@ deploy-green-dev:
     - scp ./docker-compose.yml        "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./Dockerfile                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./admin.html                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./start.sh                  "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./switch-deployment.sh      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./deploy-green.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./switch-to-green.sh        "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./rollback-to-blue.sh       "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./cleanup-blue.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./health-check.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    
+    # 전송된 파일 확인 (디버깅)
+    - echo "🔍 Verifying transferred files on EC2..."
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "cd ~/bgTest/v5ToWindow && ls -la *.sh || echo 'No .sh files found'"
     
     # Docker 환경 설정 및 컨테이너 재빌드
     - |
