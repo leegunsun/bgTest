@@ -92,24 +92,19 @@ build-dev:
     # Node.js 의존성 설치 (있는 경우)
     - if [ -f "package.json" ]; then npm ci; fi
     - if [ -f "package.json" ]; then npm run build || echo "No build script defined"; fi
-    
-    # 테스트 환경 파일 준비
+    - echo "Preparing test environment files..."
     - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
-    
-    # 배포 스크립트 파일 생성 (원본 패턴 유지)
+    - echo "Creating deployment script files..."
     - cp ./deploy-bluegreen.sh ./deploy-green.sh
     - cp ./switch-deployment.sh ./switch-to-green.sh
     - cp ./switch-deployment.sh ./rollback-to-blue.sh
     - cp ./health-check.sh ./cleanup-blue.sh
-    
-    # Docker 이미지 빌드 준비
     - echo "Preparing Docker build context..."
     - ls -al blue-server/ green-server/
     - echo "🔍 Checking shell scripts for artifacts..."
     - ls -la *.sh || echo "No .sh files found in build context"
     - echo "📁 All files for artifacts:"
     - ls -la
-    
   artifacts:
     expire_in: 3 days
     paths:
@@ -141,14 +136,10 @@ test-dev:
     - echo "Running Node.js tests for Blue-Green servers..."
     # Node.js 테스트 (있는 경우)
     - if [ -f "package.json" ]; then npm test || echo "No test script defined"; fi
-    
-    # Blue/Green 서버 구문 검사
+    - echo "Checking Blue/Green server syntax..."
     - node -c blue-server/app.js
     - node -c green-server/app.js
-    
-    # NGINX 설정 검사 (로컬에서)
     - echo "Checking NGINX configuration syntax..."
-    
   artifacts:
     when: always
     expire_in: 3 days
@@ -167,17 +158,13 @@ deploy-green-dev:
     url: "http://$DEPLOY_SERVER_DEV:3002"  # Green 서버 포트로 변경
   script:
     - echo "Deploying to Docker-based Blue-Green environment..."
-    
-    # 로컬 파일 확인 (디버깅)
     - echo "🔍 Checking local files before transfer..."
     - ls -la *.sh || echo "No .sh files found locally"
     - echo "📁 Current directory contents:"
     - ls -la
-    
-    # 대상 디렉토리 생성 (없을 경우를 대비)
+    - echo "Creating target directory..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
-    
-    # 전체 프로젝트 파일 복사
+    - echo "📁 Copying project files to target server..."
     - scp -r ./blue-server/           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./green-server/          "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./api-server/            "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
@@ -194,12 +181,9 @@ deploy-green-dev:
     - scp ./rollback-to-blue.sh       "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./cleanup-blue.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./health-check.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    
-    # 전송된 파일 확인 (디버깅)
     - echo "🔍 Verifying transferred files on EC2..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "cd ~/bgTest/v5ToWindow && ls -la *.sh || echo 'No .sh files found'"
-    
-    # Docker 환경 설정 및 컨테이너 재빌드
+    - echo "🐳 Setting up Docker environment and rebuilding containers..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         # Docker 설치 확인 및 자동 설치
