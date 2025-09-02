@@ -404,22 +404,23 @@ verify-dev:
                          "http://$DEPLOY_SERVER_DEV/status" 2>/dev/null || echo "000")
         echo "  📊 Main proxy (/status) => HTTP $main_code"
 
-        # Green 서버 직접 헬스체크
-        green_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                          --max-time 15 --connect-timeout 8 \
-                          --retry 3 --retry-delay 2 \
-                          "http://$DEPLOY_SERVER_DEV:3002/health" 2>/dev/null || echo "000")
-        echo "  🟢 Green server => HTTP $green_code"
+# 프록시를 통한 검증만 수행 (보안 그룹 이슈 회피)
 
-        # Blue 서버도 확인 (전체적인 상태 파악)
-        blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                         --max-time 15 --connect-timeout 8 \
-                         --retry 3 --retry-delay 2 \
-                         "http://$DEPLOY_SERVER_DEV:3001/health" 2>/dev/null || echo "000")
-        echo "  🔵 Blue server => HTTP $blue_code"
+        # NGINX 프록시를 통한 Blue/Green 전환 검증
+        proxy_blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                               --max-time 15 --connect-timeout 8 \
+                               --retry 3 --retry-delay 2 \
+                               "http://$DEPLOY_SERVER_DEV/blue/" 2>/dev/null || echo "000")
+        echo "  🔵 Proxy → Blue server => HTTP $proxy_blue_code"
+        
+        proxy_green_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                                --max-time 15 --connect-timeout 8 \
+                                --retry 3 --retry-delay 2 \
+                                "http://$DEPLOY_SERVER_DEV/green/" 2>/dev/null || echo "000")
+        echo "  🟢 Proxy → Green server => HTTP $proxy_green_code"
 
-        # 성공 조건: 메인 프록시와 Green 서버 모두 200
-        if [ "$main_code" = "200" ] && [ "$green_code" = "200" ]; then
+        # 성공 조건: 메인 프록시와 프록시를 통한 서버 접근 모두 성공
+        if [ "$main_code" = "200" ] && [ "$proxy_green_code" = "200" ]; then
           success_count=$((success_count + 1))
           echo "  ✅ Success! ($success_count/$required_successes consecutive successes)"
 
@@ -427,8 +428,8 @@ verify-dev:
             echo ""
             echo "🎉 Verification completed successfully!"
             echo "✅ Main proxy: HTTP $main_code"
-            echo "✅ Green server: HTTP $green_code"
-            echo "ℹ️  Blue server: HTTP $blue_code"
+            echo "✅ Proxy → Green: HTTP $proxy_green_code"
+            echo "ℹ️  Proxy → Blue: HTTP $proxy_blue_code"
             exit 0
           fi
         else
@@ -439,8 +440,8 @@ verify-dev:
           if [ "$main_code" != "200" ]; then
             echo "    🔧 Main proxy issue - check NGINX configuration"
           fi
-          if [ "$green_code" != "200" ]; then
-            echo "    🔧 Green server issue - check Node.js service"
+          if [ "$proxy_green_code" != "200" ]; then
+            echo "    🔧 Green server proxy routing issue - check NGINX upstream"
           fi
         fi
 
@@ -454,17 +455,18 @@ verify-dev:
       echo ""
       echo "❌ Verification failed after $max_attempts attempts"
       echo "💡 Troubleshooting suggestions:"
-      echo "  1. Check EC2 security groups allow ports 80, 3001, 3002, 9000"
+      echo "  1. Check NGINX proxy access: curl -v http://$DEPLOY_SERVER_DEV/status"
       echo "  2. Verify Docker containers:"
       echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker ps'"
       echo "  3. Check container logs:"
       echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker logs blue-green-nginx'"
-      echo "  4. Test internal health:"
+      echo "  4. Test proxy routing:"
+      echo "     curl -v http://$DEPLOY_SERVER_DEV/blue/"
+      echo "     curl -v http://$DEPLOY_SERVER_DEV/green/"
+      echo "  5. Check internal connectivity:"
       echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx curl localhost:3001/health'"
-      echo "  5. Test external connectivity:"
-      echo "     curl -v http://$DEPLOY_SERVER_DEV:3001/health"
-      echo "  6. Check Docker health status:"
-      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker inspect blue-green-nginx'"
+      echo "  6. Verify NGINX configuration:"
+      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx nginx -t'"
       exit 1
 
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
