@@ -269,7 +269,7 @@ health-check-dev:
 
         # 컨테이너 상태 확인
         echo \"📊 Docker container status:\"
-        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\""
+        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
 
         # 개선된 헬스체크 로직
         check_service() {
@@ -280,7 +280,7 @@ health-check-dev:
           local success_count=0
           local required_successes=2
 
-          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\""
+          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\"
 
           for i in \$(seq 1 \$max_attempts); do
             status=\$(curl -s -o /dev/null -w \"%{http_code}\" \\
@@ -290,7 +290,7 @@ health-check-dev:
 
             if [ \"\$status\" = \"200\" ]; then
               success_count=\$((success_count + 1))
-              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\""
+              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\"
 
               if [ \$success_count -ge \$required_successes ]; then
                 echo \"  🎉 \$service_name is stable!\"
@@ -298,7 +298,7 @@ health-check-dev:
               fi
             else
               success_count=0
-              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\""
+              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\"
             fi
 
             if [ \$i -lt \$max_attempts ]; then
@@ -306,7 +306,7 @@ health-check-dev:
             fi
           done
 
-          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\""
+          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\"
           return 1
         }
 
@@ -319,7 +319,7 @@ health-check-dev:
           echo \"⚠️ NGINX proxy health check failed\"
           # NGINX 로그 확인
           echo \"📋 NGINX error logs (last 10 lines):\"
-          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\""
+          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\"
         fi
 
         # Blue 서버 헬스체크
