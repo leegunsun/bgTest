@@ -161,6 +161,9 @@ deploy-green-dev:
   script:
     - echo "Deploying to Docker-based Blue-Green environment..."
     
+    # 대상 디렉토리 생성 (없을 경우를 대비)
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
+    
     # 전체 프로젝트 파일 복사
     - scp -r ./blue-server/           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./green-server/          "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
