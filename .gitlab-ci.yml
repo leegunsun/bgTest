@@ -1,3 +1,4 @@
+---
 # .gitlab-ci.yml — DEV Blue/Green 파이프라인 (테스트 환경용)
 # 기존 프로덕션 규칙을 보존하면서 Node.js 테스트 환경에 최적화
 
@@ -37,16 +38,26 @@ cache:
   services:
     - docker:dind
   before_script:
-    - apk add --no-cache bash openssh-client curl ca-certificates docker docker-compose
+    - apk add --no-cache bash openssh-client curl ca-certificates \
+        docker docker-compose
     - eval $(ssh-agent -s)
     # Environment variables debugging
     - echo "🔍 GitLab CI/CD Variables Debugging:"
-    - echo "- AWS_PEM_DEV exists:" $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- AWS_PEM_DEV length:" $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; else echo "0 (empty)"; fi)
-    - echo "- DEPLOY_SERVER_DEV exists:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEPLOY_SERVER_DEV value:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; else echo "(empty)"; fi)
-    - echo "- DEV_ENV_FILE exists:" $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEV_ENV_FILE length:" $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; else echo "0 (empty)"; fi)
+    - echo "- AWS_PEM_DEV exists:" \
+        $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- AWS_PEM_DEV length:" \
+        $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; \
+        else echo "0 (empty)"; fi)
+    - echo "- DEPLOY_SERVER_DEV exists:" \
+        $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEPLOY_SERVER_DEV value:" \
+        $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; \
+        else echo "(empty)"; fi)
+    - echo "- DEV_ENV_FILE exists:" \
+        $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEV_ENV_FILE length:" \
+        $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; \
+        else echo "0 (empty)"; fi)
     - |
       if [ -z "$AWS_PEM_DEV" ]; then
         echo ""
@@ -56,7 +67,7 @@ cache:
         echo "1. Go to: Project → Settings → CI/CD → Variables"
         echo "2. Add these variables:"
         echo "   - AWS_PEM_DEV (Type: File) - EC2 SSH private key content"
-        echo "   - DEPLOY_SERVER_DEV (Type: Variable) - EC2 IP/hostname" 
+        echo "   - DEPLOY_SERVER_DEV (Type: Variable) - EC2 IP/hostname"
         echo "   - DEV_ENV_FILE (Type: File) - Environment config file"
         echo ""
         echo "⚠️  Make sure to:"
@@ -91,7 +102,8 @@ build-dev:
     - echo "Building Node.js Blue-Green test environment..."
     # Node.js 의존성 설치 (있는 경우)
     - if [ -f "package.json" ]; then npm ci; fi
-    - if [ -f "package.json" ]; then npm run build || echo "No build script defined"; fi
+    - if [ -f "package.json" ]; then \
+        npm run build || echo "No build script defined"; fi
     - echo "Preparing test environment files..."
     - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
     - echo "Creating deployment script files..."
@@ -135,7 +147,8 @@ test-dev:
   script:
     - echo "Running Node.js tests for Blue-Green servers..."
     # Node.js 테스트 (있는 경우)
-    - if [ -f "package.json" ]; then npm test || echo "No test script defined"; fi
+    - if [ -f "package.json" ]; then \
+        npm test || echo "No test script defined"; fi
     - echo "Checking Blue/Green server syntax..."
     - node -c blue-server/app.js
     - node -c green-server/app.js
@@ -198,18 +211,20 @@ deploy-green-dev:
         else
           echo \"✅ Docker is already installed\"
         fi
-        
+
         # Docker Compose 설치 확인 및 자동 설치
         if ! command -v docker-compose &> /dev/null; then
           echo \"📦 Installing Docker Compose...\"
-          sudo curl -L \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+          sudo curl -L \
+            \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" \
+            -o /usr/local/bin/docker-compose
           sudo chmod +x /usr/local/bin/docker-compose
           sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
           echo \"✅ Docker Compose installed successfully\"
         else
           echo \"✅ Docker Compose is already installed\"
         fi
-        
+
         # 설치 버전 확인
         docker --version
         docker-compose --version
@@ -227,7 +242,7 @@ deploy-green-dev:
       echo "🚀 Starting updated containers..."
       sudo docker-compose up -d
       echo "⏳ Waiting for containers to be ready..."
-      sleep 20
+      sleep 45
       echo "📊 Container status:"
       sudo docker ps --filter name=blue-green-nginx
       echo "🏥 Docker health status:"
@@ -264,12 +279,13 @@ health-check-dev:
       ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         echo \"🏥 Health checking Blue-Green test environment...\"
         echo \"⏳ Waiting for Docker containers to fully start...\"
-        sleep 15
-        
+        sleep 30
+
         # 컨테이너 상태 확인
         echo \"📊 Docker container status:\"
-        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
-        
+        sudo docker ps --filter name=blue-green-nginx \
+          --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
+
         # 개선된 헬스체크 로직
         check_service() {
           local service_name=\"\$1\"
@@ -278,67 +294,69 @@ health-check-dev:
           local max_attempts=15
           local success_count=0
           local required_successes=2
-          
-          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\"
-          
+
+          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\""
+
           for i in \$(seq 1 \$max_attempts); do
             status=\$(curl -s -o /dev/null -w \"%{http_code}\" \\
                            --max-time 8 --connect-timeout 3 \\
                            --retry 1 --retry-delay 1 \\
                            \"http://localhost:\$port\$endpoint\" 2>/dev/null || echo \"000\")
-            
+
             if [ \"\$status\" = \"200\" ]; then
               success_count=\$((success_count + 1))
-              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\"
-              
+              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\""
+
               if [ \$success_count -ge \$required_successes ]; then
                 echo \"  🎉 \$service_name is stable!\"
                 return 0
               fi
             else
               success_count=0
-              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\"
+              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\""
             fi
-            
+
             if [ \$i -lt \$max_attempts ]; then
               sleep 3
             fi
           done
-          
-          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\"
+
+          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\""
           return 1
         }
-        
+
         # 서비스별 헬스체크 실행
         overall_status=0
-        
+
         # NGINX 프록시 헬스체크
         if ! check_service \"NGINX Proxy\" \"80\" \"/status\"; then
           overall_status=1
           echo \"⚠️ NGINX proxy health check failed\"
           # NGINX 로그 확인
           echo \"📋 NGINX error logs (last 10 lines):\"
-          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\"
+          sudo docker exec blue-green-nginx \
+            tail -n 10 /var/log/nginx/error.log 2>/dev/null || \
+            echo \"No error logs found\""
         fi
-        
+
         # Blue 서버 헬스체크
         if ! check_service \"Blue Server\" \"3001\" \"/health\"; then
           overall_status=1
           echo \"⚠️ Blue server health check failed\"
         fi
-        
+
         # Green 서버 헬스체크
         if ! check_service \"Green Server\" \"3002\" \"/health\"; then
           overall_status=1
           echo \"⚠️ Green server health check failed\"
         fi
-        
+
         # API 서버 헬스체크 (선택적)
         if ! check_service \"API Server\" \"9000\" \"/health\"; then
           echo \"⚠️ API server health check failed (non-critical)\"
           # API 서버는 비필수이므로 overall_status에 영향 주지 않음
         fi
-        
+
         if [ \$overall_status -eq 0 ]; then
           echo \"\"
           echo \"🎉 All critical services are healthy!\"
@@ -369,7 +387,7 @@ switch-traffic-dev:
   allow_failure: false
   script:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow && 
+        cd ~/bgTest/v5ToWindow &&
         echo \"Switching to Green environment...\" &&
         sudo docker exec blue-green-nginx ./switch-deployment.sh green &&
         echo \"✅ Traffic switched to Green\"
@@ -386,54 +404,54 @@ verify-dev:
     - |
       echo "🔍 Verifying Blue-Green deployment switch..."
       echo "⏳ Waiting for services to be fully ready..."
-      sleep 10
-      
+      sleep 30  # 증가: 10초 → 30초
+
       # 개선된 헬스체크 로직
-      max_attempts=10
+      max_attempts=15  # 증가: 10 → 15
       success_count=0
-      required_successes=2
-      
+      required_successes=3  # 증가: 2 → 3
+
       for i in $(seq 1 $max_attempts); do
         echo "🔄 Health check attempt $i/$max_attempts..."
-        
+
         # 메인 프록시 헬스체크 (타임아웃 증가)
         main_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                         --max-time 10 --connect-timeout 5 \
-                         --retry 2 --retry-delay 1 \
+                         --max-time 15 --connect-timeout 8 \
+                         --retry 3 --retry-delay 2 \
                          "http://$DEPLOY_SERVER_DEV/status" 2>/dev/null || echo "000")
         echo "  📊 Main proxy (/status) => HTTP $main_code"
-        
+
         # Green 서버 직접 헬스체크
         green_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                          --max-time 10 --connect-timeout 5 \
-                          --retry 2 --retry-delay 1 \
+                          --max-time 15 --connect-timeout 8 \
+                          --retry 3 --retry-delay 2 \
                           "http://$DEPLOY_SERVER_DEV:3002/health" 2>/dev/null || echo "000")
         echo "  🟢 Green server => HTTP $green_code"
-        
+
         # Blue 서버도 확인 (전체적인 상태 파악)
         blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                         --max-time 10 --connect-timeout 5 \
-                         --retry 2 --retry-delay 1 \
+                         --max-time 15 --connect-timeout 8 \
+                         --retry 3 --retry-delay 2 \
                          "http://$DEPLOY_SERVER_DEV:3001/health" 2>/dev/null || echo "000")
         echo "  🔵 Blue server => HTTP $blue_code"
-        
+
         # 성공 조건: 메인 프록시와 Green 서버 모두 200
         if [ "$main_code" = "200" ] && [ "$green_code" = "200" ]; then
           success_count=$((success_count + 1))
           echo "  ✅ Success! ($success_count/$required_successes consecutive successes)"
-          
+
           if [ $success_count -ge $required_successes ]; then
             echo ""
             echo "🎉 Verification completed successfully!"
             echo "✅ Main proxy: HTTP $main_code"
-            echo "✅ Green server: HTTP $green_code" 
+            echo "✅ Green server: HTTP $green_code"
             echo "ℹ️  Blue server: HTTP $blue_code"
             exit 0
           fi
         else
           success_count=0
           echo "  ❌ Failed - resetting success count"
-          
+
           # 디버깅 정보 출력
           if [ "$main_code" != "200" ]; then
             echo "    🔧 Main proxy issue - check NGINX configuration"
@@ -442,21 +460,28 @@ verify-dev:
             echo "    🔧 Green server issue - check Node.js service"
           fi
         fi
-        
+
         # 마지막 시도가 아니면 대기
         if [ $i -lt $max_attempts ]; then
-          echo "  ⏳ Waiting 5 seconds before next attempt..."
-          sleep 5
+          echo "  ⏳ Waiting 8 seconds before next attempt..."
+          sleep 8
         fi
       done
-      
+
       echo ""
       echo "❌ Verification failed after $max_attempts attempts"
       echo "💡 Troubleshooting suggestions:"
-      echo "  1. Check EC2 security groups allow ports 80, 3001, 3002"
-      echo "  2. Verify Docker containers are running: docker ps"
-      echo "  3. Check NGINX logs: docker logs blue-green-nginx"
-      echo "  4. Test manual connectivity: curl -v http://$DEPLOY_SERVER_DEV/status"
+      echo "  1. Check EC2 security groups allow ports 80, 3001, 3002, 9000"
+      echo "  2. Verify Docker containers:"
+      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker ps'"
+      echo "  3. Check container logs:"
+      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker logs blue-green-nginx'"
+      echo "  4. Test internal health:"
+      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx curl localhost:3001/health'"
+      echo "  5. Test external connectivity:"
+      echo "     curl -v http://$DEPLOY_SERVER_DEV:3001/health"
+      echo "  6. Check Docker health status:"
+      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker inspect blue-green-nginx'"
       exit 1
 
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
@@ -471,7 +496,7 @@ cleanup-dev:
     url: "http://$DEPLOY_SERVER_DEV:3001"  # Blue 서버 포트로 변경
   script:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow && 
+        cd ~/bgTest/v5ToWindow &&
         echo \"Cleaning up inactive Blue environment...\" &&
         echo \"Blue environment cleanup completed (container-based)\"
       "'
@@ -487,7 +512,7 @@ rollback-to-blue-dev:
     url: "http://$DEPLOY_SERVER_DEV"
   script:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow && 
+        cd ~/bgTest/v5ToWindow &&
         echo \"Rolling back to Blue environment...\" &&
         sudo docker exec blue-green-nginx ./switch-deployment.sh blue &&
         echo \"✅ Rollback to Blue completed\"

@@ -1,0 +1,12 @@
+---
+extends: default
+
+rules:
+  line-length:
+    max: 120  # GitLab CI/CD에서 일반적으로 사용되는 길이
+    level: warning  # 오류 → 경고로 변경
+  
+  trailing-spaces: enable
+  empty-lines:
+    max-end: 1
+  comments-indentation: disable
