@@ -1,0 +1,219 @@
+# .gitlab-ci.yml — DEV Blue/Green 파이프라인 (교정본)
+stages:
+  - build-dev
+  - test-dev
+  - deploy-dev
+  - health-check-dev
+  - switch-traffic-dev
+  - verify-dev
+  - cleanup-dev
+
+# 공통 변수
+variables:
+  GIT_DEPTH: "0"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx2048m -Dfile.encoding=UTF-8'"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+
+# Gradle 캐시 — 브랜치별로 분리
+cache:
+  key: "gradle-$CI_COMMIT_REF_SLUG"
+  paths:
+    - .gradle/wrapper
+    - .gradle/caches
+
+# 재사용 규칙 (dev, main 브랜치만)
+.rules_dev_and_main: &rules_dev_main
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - when: never
+
+# 재사용 Alpine 세팅 (ssh, curl 등)
+.alpine_ssh_setup: &alpine_ssh_setup
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache bash openssh-client curl ca-certificates
+    - eval $(ssh-agent -s)
+    - chmod 600 "$AWS_PEM_DEV"
+    - ssh-add "$AWS_PEM_DEV"
+    - mkdir -p ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
+
+# 1) Build
+build-dev:
+  stage: build-dev
+  image: eclipse-temurin:19
+  <<: *rules_dev_main
+  before_script:
+    - chmod +x ./gradlew
+  script:
+    - ./gradlew --version
+    - ./gradlew clean build -x test
+    # 외부 파일 변수(파일 타입 변수)를 산출물로 고정
+    - cp "$DEV_ENV_FILE" ./.env
+    - cp "$DEV_APPLICATION" ./src/main/resources/application.yml
+    # 원격에서 사용할 스크립트 파일 생성
+    - cp ./deploy-bluegreen.sh ./deploy-green.sh
+    - cp ./deploy-bluegreen.sh ./switch-to-green.sh
+    - cp ./deploy-bluegreen.sh ./rollback-to-blue.sh
+    - cp ./deploy-bluegreen.sh ./cleanup-blue.sh
+    # JAR 정리
+    - mkdir -p build/libs && ls -al build/libs
+    - mv build/libs/*.jar ./woori_be.jar
+  artifacts:
+    expire_in: 3 days
+    paths:
+      - ./woori_be.jar
+      - ./.env
+      - ./deploy-green.sh
+      - ./switch-to-green.sh
+      - ./rollback-to-blue.sh
+      - ./cleanup-blue.sh
+      - ./build/reports/tests/test
+    reports:
+      junit:
+        - build/test-results/test/TEST-*.xml
+  only:
+    - dev
+    - main
+
+# 2) Test
+test-dev:
+  stage: test-dev
+  image: eclipse-temurin:19
+  <<: *rules_dev_main
+  needs: ["build-dev"]
+  dependencies: ["build-dev"]
+  script:
+    - ./gradlew test
+  artifacts:
+    when: always
+    expire_in: 3 days
+    reports:
+      junit:
+        - build/test-results/test/TEST-*.xml
+  only:
+    - dev
+    - main
+
+# 3) Remote deploy to GREEN
+deploy-green-dev:
+  stage: deploy-dev
+  <<: *alpine_ssh_setup
+  <<: *rules_dev_main
+  needs: ["build-dev","test-dev"]
+  dependencies: ["build-dev","test-dev"]
+  environment:
+    name: green-dev
+    url: "http://$DEPLOY_SERVER_DEV:8083"
+  script:
+    - scp ./.env                     "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/.env"
+    - scp ./woori_be.jar             "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/woori_be.jar"
+    - scp ./deploy-green.sh          "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/deploy-green.sh"
+    - scp ./switch-to-green.sh       "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/switch-to-green.sh"
+    - scp ./rollback-to-blue.sh      "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/rollback-to-blue.sh"
+    - scp ./cleanup-blue.sh          "ubuntu@$DEPLOY_SERVER_DEV:~/woori-be/cleanup-blue.sh"
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "cd ~/woori-be && sudo bash ./deploy-green.sh"'
+  only:
+    - dev
+    - main
+
+# 4) Health check (server-side)
+health-check-dev:
+  stage: health-check-dev
+  <<: *alpine_ssh_setup
+  <<: *rules_dev_main
+  needs: ["deploy-green-dev"]
+  retry: 1
+  script:
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+        echo \"Health checking GREEN (8083)...\"
+        for i in \$(seq 1 10); do
+          status=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8083/actuator/health || true)
+          if [ \"\$status\" = \"200\" ]; then
+            echo \"OK on attempt \$i\"
+            exit 0
+          fi
+          echo \"Not ready (HTTP \$status). retry=\$i\"
+          sleep 5
+        done
+        echo \"Health check failed after 10 tries\"
+        exit 1
+      "'
+  only:
+    - dev
+    - main
+
+# 5) Switch traffic to GREEN (manual)
+switch-traffic-dev:
+  stage: switch-traffic-dev
+  <<: *alpine_ssh_setup
+  <<: *rules_dev_main
+  needs: ["health-check-dev"]
+  environment:
+    name: production-dev
+    url: "http://$DEPLOY_SERVER_DEV"
+  when: manual
+  allow_failure: false
+  script:
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "cd ~/woori-be && sudo bash ./switch-to-green.sh"'
+  only:
+    - dev
+    - main
+
+# 6) Verify after switch (client-side probe)
+verify-dev:
+  stage: verify-dev
+  image: alpine:latest
+  <<: *rules_dev_main
+  needs: ["switch-traffic-dev"]
+  script:
+    - apk add --no-cache curl
+    - |
+      for i in $(seq 1 5); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' "http://$DEPLOY_SERVER_DEV/actuator/health" || true)
+        echo "Attempt $i => HTTP $code"
+        if [ "$code" = "200" ]; then
+          exit 0
+        fi
+        sleep 3
+      done
+      echo "Verification failed"
+      exit 1
+  only:
+    - dev
+    - main
+
+# 7-a) Cleanup BLUE (manual)
+cleanup-dev:
+  stage: cleanup-dev
+  <<: *alpine_ssh_setup
+  <<: *rules_dev_main
+  needs: ["verify-dev"]
+  when: manual
+  allow_failure: true
+  environment:
+    name: blue-dev
+    url: "http://$DEPLOY_SERVER_DEV:8080"
+  script:
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "cd ~/woori-be && sudo bash ./cleanup-blue.sh"'
+  only:
+    - dev
+    - main
+
+# 7-b) Rollback to BLUE (manual)
+rollback-to-blue-dev:
+  stage: cleanup-dev
+  <<: *alpine_ssh_setup
+  <<: *rules_dev_main
+  when: manual
+  allow_failure: false
+  environment:
+    name: production-dev
+    url: "http://$DEPLOY_SERVER_DEV"
+  script:
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "cd ~/woori-be && sudo bash ./rollback-to-blue.sh"'
+  only:
+    - dev
+    - main

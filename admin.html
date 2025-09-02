@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blue-Green Deployment Manager</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .status-card {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+        .status-card:hover {
+            transform: translateY(-5px);
+        }
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+        }
+        .healthy { background-color: #27ae60; }
+        .unhealthy { background-color: #e74c3c; }
+        .unknown { background-color: #f39c12; }
+        
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            color: white;
+        }
+        .btn-blue {
+            background: linear-gradient(45deg, #3498db, #2980b9);
+        }
+        .btn-green {
+            background: linear-gradient(45deg, #27ae60, #229954);
+        }
+        .btn-health {
+            background: linear-gradient(45deg, #9b59b6, #8e44ad);
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        }
+        
+        .logs {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            opacity: 0.8;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Blue-Green Deployment Manager</h1>
+        <p style="text-align: center; font-size: 18px; margin-bottom: 30px;">
+            새로운 판단 파일 기반의 NGINX 무중단 배포 시스템
+        </p>
+        
+        <div class="status-grid">
+            <div class="status-card">
+                <h3>🔵 Blue Server</h3>
+                <p><span class="status-indicator unknown" id="blue-status"></span><span id="blue-text">확인 중...</span></p>
+                <p><a href="http://localhost/blue/" target="_blank">직접 접속</a></p>
+            </div>
+            <div class="status-card">
+                <h3>🟢 Green Server</h3>
+                <p><span class="status-indicator unknown" id="green-status"></span><span id="green-text">확인 중...</span></p>
+                <p><a href="http://localhost/green/" target="_blank">직접 접속</a></p>
+            </div>
+            <div class="status-card">
+                <h3>⚙️ NGINX Proxy</h3>
+                <p><span class="status-indicator unknown" id="nginx-status"></span><span id="nginx-text">확인 중...</span></p>
+                <p><a href="http://localhost/" target="_blank">메인 사이트</a></p>
+            </div>
+            <div class="status-card">
+                <h3>🔧 API Server</h3>
+                <p><span class="status-indicator unknown" id="api-status"></span><span id="api-text">확인 중...</span></p>
+                <p>배포 전환 API</p>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button class="btn btn-blue" onclick="switchDeployment('blue')">🔵 Blue로 전환</button>
+            <button class="btn btn-green" onclick="switchDeployment('green')">🟢 Green으로 전환</button>
+            <button class="btn btn-health" onclick="checkHealth()">🏥 헬스체크</button>
+        </div>
+        
+        <div class="logs" id="logs">
+시스템 로그가 여기에 표시됩니다...
+배포 전환 및 헬스체크 결과를 실시간으로 확인할 수 있습니다.
+        </div>
+        
+        <div class="footer">
+            <p>Based on <strong>새로운 판단 파일</strong> NGINX Best Practices</p>
+            <p>Atomic File Replacement | Enhanced Health Checks | Graceful Rollback</p>
+        </div>
+    </div>
+
+    <script>
+        function log(message) {
+            const logs = document.getElementById('logs');
+            const timestamp = new Date().toLocaleTimeString();
+            logs.textContent += `[${timestamp}] ${message}\n`;
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function updateStatus(service, status) {
+            const indicator = document.getElementById(`${service}-status`);
+            const text = document.getElementById(`${service}-text`);
+            
+            indicator.className = `status-indicator ${status}`;
+            text.textContent = status === 'healthy' ? '정상' : status === 'unhealthy' ? '오류' : '확인 중...';
+        }
+
+        async function checkHealth() {
+            log('전체 헬스체크 시작...');
+            
+            const services = [
+                { name: 'blue', port: 3001, endpoint: '/health' },
+                { name: 'green', port: 3002, endpoint: '/health' },
+                { name: 'nginx', port: 80, endpoint: '/status' },
+                { name: 'api', port: 9000, endpoint: '/health' }
+            ];
+            
+            for (const service of services) {
+                try {
+                    updateStatus(service.name, 'unknown');
+                    const response = await fetch(`http://localhost:${service.port}${service.endpoint}`);
+                    
+                    if (response.ok) {
+                        updateStatus(service.name, 'healthy');
+                        log(`${service.name.toUpperCase()} 서버: 정상`);
+                    } else {
+                        updateStatus(service.name, 'unhealthy');
+                        log(`${service.name.toUpperCase()} 서버: 오류 (${response.status})`);
+                    }
+                } catch (error) {
+                    updateStatus(service.name, 'unhealthy');
+                    log(`${service.name.toUpperCase()} 서버: 연결 실패`);
+                }
+            }
+            log('헬스체크 완료');
+        }
+
+        async function switchDeployment(target) {
+            log(`${target.toUpperCase()} 환경으로 전환 시작...`);
+            
+            try {
+                const response = await fetch(`http://localhost:9000/switch/${target}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    log(`✅ ${target.toUpperCase()} 환경으로 전환 성공`);
+                    log(result.message);
+                } else {
+                    log(`❌ ${target.toUpperCase()} 환경 전환 실패: ${result.error}`);
+                }
+            } catch (error) {
+                log(`❌ ${target.toUpperCase()} 환경 전환 실패: ${error.message}`);
+            }
+            
+            // 전환 후 헬스체크
+            setTimeout(checkHealth, 2000);
+        }
+
+        // 페이지 로드 시 헬스체크 실행
+        window.onload = function() {
+            log('Blue-Green Deployment Manager 초기화 완료');
+            log('새로운 판단 파일 기반 NGINX 무중단 배포 시스템');
+            setTimeout(checkHealth, 1000);
+        };
+
+        // 주기적 헬스체크 (30초마다)
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>
