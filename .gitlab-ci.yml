@@ -179,16 +179,49 @@ deploy-green-dev:
     - scp ./cleanup-blue.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./health-check.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     
-    # Docker 컨테이너 재빌드 및 배포
+    # Docker 환경 설정 및 컨테이너 재빌드
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+        # Docker 설치 확인 및 자동 설치
+        echo \"🔍 Checking Docker installation...\"
+        if ! command -v docker &> /dev/null; then
+          echo \"📦 Installing Docker...\"
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo usermod -aG docker ubuntu
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          echo \"✅ Docker installed successfully\"
+        else
+          echo \"✅ Docker is already installed\"
+        fi
+        
+        # Docker Compose 설치 확인 및 자동 설치
+        if ! command -v docker-compose &> /dev/null; then
+          echo \"📦 Installing Docker Compose...\"
+          sudo curl -L \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+          echo \"✅ Docker Compose installed successfully\"
+        else
+          echo \"✅ Docker Compose is already installed\"
+        fi
+        
+        # 설치 버전 확인
+        docker --version
+        docker-compose --version
+      "'
+    
+    # 새 세션에서 Docker 그룹 권한으로 배포 실행
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         cd ~/bgTest/v5ToWindow && 
         echo \"Stopping existing containers...\" &&
-        docker-compose down || true &&
+        sudo docker-compose down || true &&
         echo \"Rebuilding Docker image...\" &&
-        docker build -t blue-green-nginx . &&
+        sudo docker build -t blue-green-nginx . &&
         echo \"Starting updated containers...\" &&
-        docker-compose up -d &&
-        echo \"Deployment completed\"
+        sudo docker-compose up -d &&
+        echo \"✅ Deployment completed\"
       "'
 
 # 4) Health check — 포트와 엔드포인트 수정
@@ -258,8 +291,8 @@ switch-traffic-dev:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         cd ~/bgTest/v5ToWindow && 
         echo \"Switching to Green environment...\" &&
-        docker exec blue-green-nginx ./switch-deployment.sh green &&
-        echo \"Traffic switched to Green\"
+        sudo docker exec blue-green-nginx ./switch-deployment.sh green &&
+        echo \"✅ Traffic switched to Green\"
       "'
 
 # 6) Verify after switch — 엔드포인트 수정
@@ -322,6 +355,6 @@ rollback-to-blue-dev:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         cd ~/bgTest/v5ToWindow && 
         echo \"Rolling back to Blue environment...\" &&
-        docker exec blue-green-nginx ./switch-deployment.sh blue &&
-        echo \"Rollback to Blue completed\"
+        sudo docker exec blue-green-nginx ./switch-deployment.sh blue &&
+        echo \"✅ Rollback to Blue completed\"
       "'"
