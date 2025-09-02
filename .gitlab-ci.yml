@@ -1,40 +1,11 @@
-# 첫 번째 테스트 - Hello World
 stages:
   - test
-  - info
-  - docker-test
 
-# Job 1: 기본 연결 테스트
 hello-world:
   stage: test
   image: alpine:latest
   script:
-    - echo "🎉 축하합니다! GitLab Runner가 작동합니다!"
-    - echo "현재 시간: $(date)"
-    - echo "Runner 이름: $CI_RUNNER_DESCRIPTION"
-    - echo "Job ID: $CI_JOB_ID"
-
-# Job 2: 시스템 정보 확인
-system-info:
-  stage: info
-  image: alpine:latest
-  script:
-    - echo "=== 시스템 정보 ==="
-    - uname -a
-    - echo "=== CPU 정보 ==="
-    - cat /proc/cpuinfo | grep "model name" | head -1
-    - echo "=== 메모리 정보 ==="
-    - free -h
-    - echo "=== 디스크 정보 ==="
-    - df -h
-
-# Job 3: Docker 기능 테스트
-docker-test:
-  stage: docker-test
-  image: docker:latest
-  script:
-    - docker version
-    - echo "=== Docker 컨테이너 목록 ==="
-    - docker ps
-    - echo "=== Docker 이미지 테스트 ==="
-    - docker run --rm hello-world
+    - echo "GitLab Runner Test Success"
+    - date
+    - pwd
+    - ls -la
