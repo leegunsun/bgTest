@@ -150,8 +150,8 @@ test-dev:
 deploy-green-dev:
   stage: deploy-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["build-dev","test-dev"]
-  dependencies: ["build-dev","test-dev"]
+  needs: ["build-dev", "test-dev"]
+  dependencies: ["build-dev", "test-dev"]
   environment:
     name: green-dev
     url: "http://$DEPLOY_SERVER_DEV:3002"  # Green 서버 포트로 변경
@@ -214,63 +214,43 @@ deploy-green-dev:
         docker --version
         docker-compose --version
       "'
-    
-    # 새 세션에서 Docker 그룹 권한으로 배포 실행
+    - echo "Starting Docker container deployment process..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow && 
+        cd ~/bgTest/v5ToWindow &&
         echo \"🔄 Starting deployment process...\" &&
-        
-        # 기존 컨테이너 정리
         echo \"🛑 Stopping existing containers...\" &&
         sudo docker-compose down --timeout 30 || true &&
-        
-        # 이전 이미지 정리 (디스크 공간 확보)
         echo \"🧹 Cleaning up old images...\" &&
         sudo docker image prune -f || true &&
-        
-        # Docker 이미지 재빌드
         echo \"🏗️ Rebuilding Docker image...\" &&
         sudo docker build --no-cache -t blue-green-nginx . &&
-        
-        # 컨테이너 시작
         echo \"🚀 Starting updated containers...\" &&
         sudo docker-compose up -d &&
-        
-        # 컨테이너 시작 대기
         echo \"⏳ Waiting for containers to be ready...\" &&
         sleep 20 &&
-        
-        # 컨테이너 상태 확인
         echo \"📊 Container status:\" &&
         sudo docker ps --filter name=blue-green-nginx &&
-        
-        # Docker 헬스체크 상태 확인
         echo \"🏥 Docker health status:\" &&
         for i in \$(seq 1 12); do
           health_status=\$(sudo docker inspect --format=\"{{.State.Health.Status}}\" blue-green-nginx 2>/dev/null || echo \"no-healthcheck\")
-          echo \"Health check attempt \$i: \$health_status\"
-          
+          echo \"Health check attempt \$i - \$health_status\"
           if [ \"\$health_status\" = \"healthy\" ]; then
             echo \"✅ Container is healthy!\"
             break
           elif [ \"\$health_status\" = \"no-healthcheck\" ]; then
             echo \"⚠️ No healthcheck configured, checking manually...\"
-            # 수동 헬스체크
             if sudo docker exec blue-green-nginx curl -f http://localhost/status >/dev/null 2>&1; then
               echo \"✅ Manual health check passed!\"
               break
             fi
           fi
-          
           if [ \$i -eq 12 ]; then
             echo \"❌ Container failed to become healthy\"
             sudo docker logs --tail 50 blue-green-nginx
             exit 1
           fi
-          
           sleep 10
         done &&
-        
         echo \"✅ Deployment completed successfully!\"
       "'
 
