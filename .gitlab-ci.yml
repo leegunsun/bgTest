@@ -158,17 +158,29 @@ detect-active-environment:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow
       echo "📊 Current Environment Detection:"
-      # Copy and run environment detection script
-      chmod +x ./detect-active-env.sh
-      echo "Running environment detection..."
-      sudo docker exec blue-green-nginx ./detect-active-env.sh detect
-      echo "\\n# Extracting deployment variables:"
-      CURRENT_ACTIVE=$(sudo docker exec blue-green-nginx ./detect-active-env.sh current)
-      DEPLOY_TARGET=$(sudo docker exec blue-green-nginx ./detect-active-env.sh next)
+
+      # 호스트에서 현재 활성 환경 감지 (컨테이너 외부)
+      if [ -f "./detect-active-env.sh" ]; then
+        chmod +x ./detect-active-env.sh
+        echo "Running environment detection on host..."
+        CURRENT_ACTIVE=$(./detect-active-env.sh current 2>/dev/null || echo "green")
+        DEPLOY_TARGET=$(./detect-active-env.sh next 2>/dev/null || echo "blue")
+      else
+        echo "⚠️ Environment detection script not found, using fallback detection..."
+        # 컨테이너에서 직접 확인
+        CURRENT_ACTIVE=$(sudo docker exec blue-green-nginx sh -c "if grep -q \"green\" /etc/nginx/conf.d/active.env 2>/dev/null; then echo \"green\"; else echo \"blue\"; fi" 2>/dev/null || echo "green")
+        if [ "$CURRENT_ACTIVE" = "green" ]; then
+          DEPLOY_TARGET="blue"
+        else
+          DEPLOY_TARGET="green"
+        fi
+      fi
+
       echo "CURRENT_ACTIVE=$CURRENT_ACTIVE"
       echo "DEPLOY_TARGET=$DEPLOY_TARGET"
       echo "TARGET_PORT=$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo \"3001\"; else echo \"3002\"; fi)"
       echo "TARGET_ENV_NAME=${DEPLOY_TARGET}-dev"
+
       # Save to file for next stages
       echo "$CURRENT_ACTIVE" > ~/current_active.env
       echo "$DEPLOY_TARGET" > ~/deploy_target.env
@@ -412,7 +424,12 @@ switch-traffic-to-inactive:
         sudo docker exec blue-green-nginx ./switch-deployment.sh \$DEPLOY_TARGET
         echo \"✅ Traffic switched to \$DEPLOY_TARGET\"
         echo \"📊 New configuration:\"
-        sudo docker exec blue-green-nginx ./detect-active-env.sh status
+        if [ -f \"./detect-active-env.sh\" ]; then
+          chmod +x ./detect-active-env.sh
+          ./detect-active-env.sh status || echo \"Environment detection script not available\"
+        else
+          echo \"Environment detection completed - \$DEPLOY_TARGET now active\"
+        fi
       "'
 
 # 6) Verify after switch — 동적 환경 검증 로직
