@@ -404,15 +404,13 @@ verify-dev:
                          "http://$DEPLOY_SERVER_DEV/status" 2>/dev/null || echo "000")
         echo "  📊 Main proxy (/status) => HTTP $main_code"
 
-# 프록시를 통한 검증만 수행 (보안 그룹 이슈 회피)
-
+        # 프록시를 통한 검증만 수행 (보안 그룹 이슈 회피)
         # NGINX 프록시를 통한 Blue/Green 전환 검증
         proxy_blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
                                --max-time 15 --connect-timeout 8 \
                                --retry 3 --retry-delay 2 \
                                "http://$DEPLOY_SERVER_DEV/blue/" 2>/dev/null || echo "000")
         echo "  🔵 Proxy → Blue server => HTTP $proxy_blue_code"
-        
         proxy_green_code=$(curl -s -o /dev/null -w '%{http_code}' \
                                 --max-time 15 --connect-timeout 8 \
                                 --retry 3 --retry-delay 2 \
