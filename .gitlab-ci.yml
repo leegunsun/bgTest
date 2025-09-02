@@ -215,44 +215,43 @@ deploy-green-dev:
         docker-compose --version
       "'
     - echo "Starting Docker container deployment process..."
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow &&
-        echo \"🔄 Starting deployment process...\" &&
-        echo \"🛑 Stopping existing containers...\" &&
-        sudo docker-compose down --timeout 30 || true &&
-        echo \"🧹 Cleaning up old images...\" &&
-        sudo docker image prune -f || true &&
-        echo \"🏗️ Rebuilding Docker image...\" &&
-        sudo docker build --no-cache -t blue-green-nginx . &&
-        echo \"🚀 Starting updated containers...\" &&
-        sudo docker-compose up -d &&
-        echo \"⏳ Waiting for containers to be ready...\" &&
-        sleep 20 &&
-        echo \"📊 Container status:\" &&
-        sudo docker ps --filter name=blue-green-nginx &&
-        echo \"🏥 Docker health status:\" &&
-        for i in \$(seq 1 12); do
-          health_status=\$(sudo docker inspect --format=\"{{.State.Health.Status}}\" blue-green-nginx 2>/dev/null || echo \"no-healthcheck\")
-          echo \"Health check attempt \$i - \$health_status\"
-          if [ \"\$health_status\" = \"healthy\" ]; then
-            echo \"✅ Container is healthy!\"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow
+      echo "🔄 Starting deployment process..."
+      echo "🛑 Stopping existing containers..."
+      sudo docker-compose down --timeout 30 || true
+      echo "🧹 Cleaning up old images..."
+      sudo docker image prune -f || true
+      echo "🏗️ Rebuilding Docker image..."
+      sudo docker build --no-cache -t blue-green-nginx .
+      echo "🚀 Starting updated containers..."
+      sudo docker-compose up -d
+      echo "⏳ Waiting for containers to be ready..."
+      sleep 20
+      echo "📊 Container status:"
+      sudo docker ps --filter name=blue-green-nginx
+      echo "🏥 Docker health status:"
+      for i in $(seq 1 12); do
+        health_status=$(sudo docker inspect --format="{{.State.Health.Status}}" blue-green-nginx 2>/dev/null || echo "no-healthcheck")
+        echo "Health check attempt $i - $health_status"
+        if [ "$health_status" = "healthy" ]; then
+          echo "✅ Container is healthy!"
+          break
+        elif [ "$health_status" = "no-healthcheck" ]; then
+          echo "⚠️ No healthcheck configured, checking manually..."
+          if sudo docker exec blue-green-nginx curl -f http://localhost/status >/dev/null 2>&1; then
+            echo "✅ Manual health check passed!"
             break
-          elif [ \"\$health_status\" = \"no-healthcheck\" ]; then
-            echo \"⚠️ No healthcheck configured, checking manually...\"
-            if sudo docker exec blue-green-nginx curl -f http://localhost/status >/dev/null 2>&1; then
-              echo \"✅ Manual health check passed!\"
-              break
-            fi
           fi
-          if [ \$i -eq 12 ]; then
-            echo \"❌ Container failed to become healthy\"
-            sudo docker logs --tail 50 blue-green-nginx
-            exit 1
-          fi
-          sleep 10
-        done &&
-        echo \"✅ Deployment completed successfully!\"
-      "'
+        fi
+        if [ $i -eq 12 ]; then
+          echo "❌ Container failed to become healthy"
+          sudo docker logs --tail 50 blue-green-nginx
+          exit 1
+        fi
+        sleep 10
+      done
+      echo "✅ Deployment completed successfully!"'
 
 # 4) Health check — 개선된 헬스체크 로직
 health-check-dev:
