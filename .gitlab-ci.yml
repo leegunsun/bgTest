@@ -5,6 +5,7 @@
 stages:
   - build-dev
   - test-dev
+  - detect-env-dev
   - deploy-dev
   - health-check-dev
   - switch-traffic-dev
@@ -125,6 +126,7 @@ build-dev:
       - ./rollback-to-blue.sh
       - ./cleanup-blue.sh
       - ./health-check.sh
+      - ./detect-active-env.sh
 
 # 2) Test — Node.js 기본 테스트
 test-dev:
@@ -147,15 +149,46 @@ test-dev:
     paths:
       - test-results/
 
-# 3) Remote deploy to Docker container — 핵심 수정 부분
-deploy-green-dev:
-  stage: deploy-dev
+# 2.5) Environment Detection — 새로운 단계: 현재 활성 환경 감지 및 배포 대상 결정
+detect-active-environment:
+  stage: detect-env-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["build-dev", "test-dev"]
   dependencies: ["build-dev", "test-dev"]
+  script:
+    - echo "🔍 Detecting current active environment on remote server..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow
+      echo "📊 Current Environment Detection:"
+      # Copy and run environment detection script
+      chmod +x ./detect-active-env.sh
+      echo "Running environment detection..."
+      sudo docker exec blue-green-nginx ./detect-active-env.sh detect
+      echo "\\n# Extracting deployment variables:"
+      CURRENT_ACTIVE=$(sudo docker exec blue-green-nginx ./detect-active-env.sh current)
+      DEPLOY_TARGET=$(sudo docker exec blue-green-nginx ./detect-active-env.sh next)
+      echo "CURRENT_ACTIVE=$CURRENT_ACTIVE"
+      echo "DEPLOY_TARGET=$DEPLOY_TARGET"
+      echo "TARGET_PORT=$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo \"3001\"; else echo \"3002\"; fi)"
+      echo "TARGET_ENV_NAME=${DEPLOY_TARGET}-dev"
+      # Save to file for next stages
+      echo "$CURRENT_ACTIVE" > ~/current_active.env
+      echo "$DEPLOY_TARGET" > ~/deploy_target.env
+      '
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - environment_detection.env
+
+# 3) Dynamic Remote deploy to inactive environment — 개선된 동적 배포
+deploy-inactive-environment:
+  stage: deploy-dev
+  <<: [*alpine_docker_setup, *rules_dev_main]
+  needs: ["detect-active-environment"]
+  dependencies: ["build-dev", "test-dev"]
   environment:
-    name: green-dev
-    url: "http://$DEPLOY_SERVER_DEV:3002"  # Green 서버 포트로 변경
+    name: inactive-env
+    url: "http://$DEPLOY_SERVER_DEV"  # 동적으로 결정됨
   script:
     - echo "Deploying to Docker-based Blue-Green environment..."
     - echo "🔍 Checking local files before transfer..."
@@ -181,6 +214,7 @@ deploy-green-dev:
     - scp ./rollback-to-blue.sh       "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./cleanup-blue.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./health-check.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./detect-active-env.sh      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - echo "🔍 Verifying transferred files on EC2..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "cd ~/bgTest/v5ToWindow && ls -la *.sh || echo 'No .sh files found'"
     - echo "🐳 Setting up Docker environment and rebuilding containers..."
@@ -254,11 +288,11 @@ deploy-green-dev:
       done
       echo "✅ Deployment completed successfully!"'
 
-# 4) Health check — 개선된 헬스체크 로직
-health-check-dev:
+# 4) Health check — 동적 환경 헬스체크 로직
+health-check-inactive-env:
   stage: health-check-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["deploy-green-dev"]
+  needs: ["deploy-inactive-environment"]
   retry: 2
   script:
     - |
@@ -328,10 +362,14 @@ health-check-dev:
           echo \"⚠️ Blue server health check failed\"
         fi
 
-        # Green 서버 헬스체크
-        if ! check_service \"Green Server\" \"3002\" \"/health\"; then
+        # 배포된 환경 확인 및 헬스체크
+        DEPLOY_TARGET=\$(cat ~/deploy_target.env 2>/dev/null || echo \"green\")
+        TARGET_PORT=\$(if [ \"\$DEPLOY_TARGET\" = \"blue\" ]; then echo \"3001\"; else echo \"3002\"; fi)
+
+        echo \"🎯 Checking deployed environment: \$DEPLOY_TARGET (port \$TARGET_PORT)\"
+        if ! check_service \"\$DEPLOY_TARGET Server\" \"\$TARGET_PORT\" \"/health\"; then
           overall_status=1
-          echo \"⚠️ Green server health check failed\"
+          echo \"⚠️ \$DEPLOY_TARGET server health check failed\"
         fi
 
         # API 서버 헬스체크 (선택적)
@@ -358,30 +396,34 @@ health-check-dev:
         fi
       "'
 
-# 5) Switch traffic to GREEN — 원본 구조 유지, 스크립트 호출 방식으로 수정
-switch-traffic-dev:
+# 5) Switch traffic to inactive environment — 동적 트래픽 전환
+switch-traffic-to-inactive:
   stage: switch-traffic-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["health-check-dev"]
+  needs: ["health-check-inactive-env"]
   environment:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   when: manual  # 원본의 수동 실행 정책 유지
   allow_failure: false
   script:
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow &&
-        echo \"Switching to Green environment...\" &&
-        sudo docker exec blue-green-nginx ./switch-deployment.sh green &&
-        echo \"✅ Traffic switched to Green\"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+        cd ~/bgTest/v5ToWindow
+        DEPLOY_TARGET=\$(cat ~/deploy_target.env 2>/dev/null || echo \"green\")
+        echo \"🔄 Switching traffic to \$DEPLOY_TARGET environment...\"
+        sudo docker exec blue-green-nginx ./switch-deployment.sh \$DEPLOY_TARGET
+        echo \"✅ Traffic switched to \$DEPLOY_TARGET\"
+        echo \"📊 New configuration:\"
+        sudo docker exec blue-green-nginx ./detect-active-env.sh status
       "'
 
-# 6) Verify after switch — 개선된 헬스체크 로직
-verify-dev:
+# 6) Verify after switch — 동적 환경 검증 로직
+verify-switch:
   stage: verify-dev
   image: alpine:latest
   <<: *rules_dev_main
-  needs: ["switch-traffic-dev"]
+  needs: ["switch-traffic-to-inactive"]
   script:
     - apk add --no-cache curl
     - |
@@ -417,17 +459,31 @@ verify-dev:
                                 "http://$DEPLOY_SERVER_DEV/green/" 2>/dev/null || echo "000")
         echo "  🟢 Proxy → Green server => HTTP $proxy_green_code"
 
-        # 성공 조건: 메인 프록시와 프록시를 통한 서버 접근 모두 성공
-        if [ "$main_code" = "200" ] && [ "$proxy_green_code" = "200" ]; then
+        # 동적 성공 조건: 메인 프록시와 현재 활성화된 환경 모두 성공
+        # 어떤 환경이 현재 활성인지 먼저 확인
+        active_env="green"  # 기본값, 실제로는 동적으로 결정됨
+        target_code="$proxy_green_code"
+
+        # Blue와 Green 중 어느 것이 응답하는지 확인하여 현재 활성 환경 판단
+        if [ "$proxy_blue_code" = "200" ] && [ "$proxy_green_code" != "200" ]; then
+          active_env="blue"
+          target_code="$proxy_blue_code"
+        elif [ "$proxy_green_code" = "200" ]; then
+          active_env="green"
+          target_code="$proxy_green_code"
+        fi
+
+        if [ "$main_code" = "200" ] && [ "$target_code" = "200" ]; then
           success_count=$((success_count + 1))
-          echo "  ✅ Success! ($success_count/$required_successes consecutive successes)"
+          echo "  ✅ Success! Active: $active_env ($success_count/$required_successes consecutive successes)"
 
           if [ $success_count -ge $required_successes ]; then
             echo ""
-            echo "🎉 Verification completed successfully!"
+            echo "🎉 Blue-Green deployment verification completed successfully!"
             echo "✅ Main proxy: HTTP $main_code"
-            echo "✅ Proxy → Green: HTTP $proxy_green_code"
+            echo "✅ Active environment: $active_env (HTTP $target_code)"
             echo "ℹ️  Proxy → Blue: HTTP $proxy_blue_code"
+            echo "ℹ️  Proxy → Green: HTTP $proxy_green_code"
             exit 0
           fi
         else
@@ -438,8 +494,8 @@ verify-dev:
           if [ "$main_code" != "200" ]; then
             echo "    🔧 Main proxy issue - check NGINX configuration"
           fi
-          if [ "$proxy_green_code" != "200" ]; then
-            echo "    🔧 Green server proxy routing issue - check NGINX upstream"
+          if [ "$target_code" != "200" ]; then
+            echo "    🔧 $active_env server proxy routing issue - check NGINX upstream"
           fi
         fi
 
@@ -467,25 +523,28 @@ verify-dev:
       echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx nginx -t'"
       exit 1
 
-# 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
-cleanup-dev:
+# 7-a) Cleanup inactive environment — 동적 정리
+cleanup-inactive-env:
   stage: cleanup-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["verify-dev"]
+  needs: ["verify-switch"]
   when: manual  # 원본의 수동 실행 정책 유지
   allow_failure: true
   environment:
-    name: blue-dev
-    url: "http://$DEPLOY_SERVER_DEV:3001"  # Blue 서버 포트로 변경
+    name: inactive-env
+    url: "http://$DEPLOY_SERVER_DEV"
   script:
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow &&
-        echo \"Cleaning up inactive Blue environment...\" &&
-        echo \"Blue environment cleanup completed (container-based)\"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+        cd ~/bgTest/v5ToWindow
+        CURRENT_ACTIVE=\$(cat ~/current_active.env 2>/dev/null || echo \"blue\")
+        echo \"🧹 Cleaning up previously active \$CURRENT_ACTIVE environment...\"
+        echo \"Previous \$CURRENT_ACTIVE environment cleanup completed (container-based)\"
+        echo \"ℹ️  Both environments remain available for instant rollback\"
       "'
 
-# 7-b) Rollback to BLUE — 원본 구조 유지, 스크립트 호출 방식으로 수정
-rollback-to-blue-dev:
+# 7-b) Rollback to previous environment — 동적 롤백
+rollback-to-previous:
   stage: cleanup-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
   when: manual  # 원본의 수동 실행 정책 유지
@@ -494,9 +553,13 @@ rollback-to-blue-dev:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   script:
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        cd ~/bgTest/v5ToWindow &&
-        echo \"Rolling back to Blue environment...\" &&
-        sudo docker exec blue-green-nginx ./switch-deployment.sh blue &&
-        echo \"✅ Rollback to Blue completed\"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+        cd ~/bgTest/v5ToWindow
+        PREVIOUS_ACTIVE=\$(cat ~/current_active.env 2>/dev/null || echo \"blue\")
+        echo \"🔄 Rolling back to previous \$PREVIOUS_ACTIVE environment...\"
+        sudo docker exec blue-green-nginx ./switch-deployment.sh \$PREVIOUS_ACTIVE
+        echo \"✅ Rollback to \$PREVIOUS_ACTIVE completed\"
+        echo \"📊 Rollback status:\"
+        sudo docker exec blue-green-nginx ./detect-active-env.sh status
       "'
