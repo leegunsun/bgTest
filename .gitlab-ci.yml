@@ -134,7 +134,6 @@ test-dev:
   image: node:18-alpine
   <<: *rules_dev_main
   needs: ["build-dev"]
-  dependencies: ["build-dev"]
   script:
     - echo "Running Node.js tests for Blue-Green servers..."
     # Node.js 테스트 (있는 경우)
@@ -154,7 +153,6 @@ detect-active-environment:
   stage: detect-env-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["build-dev", "test-dev"]
-  dependencies: ["build-dev", "test-dev"]
   script:
     - echo "🔍 Detecting current active environment on remote server..."
     - |
@@ -184,8 +182,7 @@ detect-active-environment:
 deploy-inactive-environment:
   stage: deploy-dev
   <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["detect-active-environment"]
-  dependencies: ["build-dev", "test-dev"]
+  needs: ["detect-active-environment", "build-dev", "test-dev"]
   environment:
     name: inactive-env
     url: "http://$DEPLOY_SERVER_DEV"  # 동적으로 결정됨
