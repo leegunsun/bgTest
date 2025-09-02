@@ -18,11 +18,11 @@ services:
       # - ./admin.html:/var/www/html/index.html:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/status"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -f http://localhost/status && curl -f http://localhost:3001/health && curl -f http://localhost:3002/health"]
+      interval: 15s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 30s
 
 volumes:
   nginx_logs:

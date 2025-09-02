@@ -235,65 +235,165 @@ deploy-green-dev:
     # 새 세션에서 Docker 그룹 권한으로 배포 실행
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
         cd ~/bgTest/v5ToWindow && 
-        echo \"Stopping existing containers...\" &&
-        sudo docker-compose down || true &&
-        echo \"Rebuilding Docker image...\" &&
-        sudo docker build -t blue-green-nginx . &&
-        echo \"Starting updated containers...\" &&
+        echo \"🔄 Starting deployment process...\" &&
+        
+        # 기존 컨테이너 정리
+        echo \"🛑 Stopping existing containers...\" &&
+        sudo docker-compose down --timeout 30 || true &&
+        
+        # 이전 이미지 정리 (디스크 공간 확보)
+        echo \"🧹 Cleaning up old images...\" &&
+        sudo docker image prune -f || true &&
+        
+        # Docker 이미지 재빌드
+        echo \"🏗️ Rebuilding Docker image...\" &&
+        sudo docker build --no-cache -t blue-green-nginx . &&
+        
+        # 컨테이너 시작
+        echo \"🚀 Starting updated containers...\" &&
         sudo docker-compose up -d &&
-        echo \"✅ Deployment completed\"
+        
+        # 컨테이너 시작 대기
+        echo \"⏳ Waiting for containers to be ready...\" &&
+        sleep 20 &&
+        
+        # 컨테이너 상태 확인
+        echo \"📊 Container status:\" &&
+        sudo docker ps --filter name=blue-green-nginx &&
+        
+        # Docker 헬스체크 상태 확인
+        echo \"🏥 Docker health status:\" &&
+        for i in \$(seq 1 12); do
+          health_status=\$(sudo docker inspect --format=\"{{.State.Health.Status}}\" blue-green-nginx 2>/dev/null || echo \"no-healthcheck\")
+          echo \"Health check attempt \$i: \$health_status\"
+          
+          if [ \"\$health_status\" = \"healthy\" ]; then
+            echo \"✅ Container is healthy!\"
+            break
+          elif [ \"\$health_status\" = \"no-healthcheck\" ]; then
+            echo \"⚠️ No healthcheck configured, checking manually...\"
+            # 수동 헬스체크
+            if sudo docker exec blue-green-nginx curl -f http://localhost/status >/dev/null 2>&1; then
+              echo \"✅ Manual health check passed!\"
+              break
+            fi
+          fi
+          
+          if [ \$i -eq 12 ]; then
+            echo \"❌ Container failed to become healthy\"
+            sudo docker logs --tail 50 blue-green-nginx
+            exit 1
+          fi
+          
+          sleep 10
+        done &&
+        
+        echo \"✅ Deployment completed successfully!\"
       "'
 
-# 4) Health check — 포트와 엔드포인트 수정
+# 4) Health check — 개선된 헬스체크 로직
 health-check-dev:
   stage: health-check-dev
   <<: *alpine_docker_setup
   <<: *rules_dev_main
   needs: ["deploy-green-dev"]
-  retry: 1
+  retry: 2
   script:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        echo \"Health checking Blue-Green test environment...\"
+        echo \"🏥 Health checking Blue-Green test environment...\"
+        echo \"⏳ Waiting for Docker containers to fully start...\"
+        sleep 15
+        
+        # 컨테이너 상태 확인
+        echo \"📊 Docker container status:\"
+        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
+        
+        # 개선된 헬스체크 로직
+        check_service() {
+          local service_name=\"\$1\"
+          local port=\"\$2\"
+          local endpoint=\"\$3\"
+          local max_attempts=15
+          local success_count=0
+          local required_successes=2
+          
+          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\"
+          
+          for i in \$(seq 1 \$max_attempts); do
+            status=\$(curl -s -o /dev/null -w \"%{http_code}\" \\
+                           --max-time 8 --connect-timeout 3 \\
+                           --retry 1 --retry-delay 1 \\
+                           \"http://localhost:\$port\$endpoint\" 2>/dev/null || echo \"000\")
+            
+            if [ \"\$status\" = \"200\" ]; then
+              success_count=\$((success_count + 1))
+              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\"
+              
+              if [ \$success_count -ge \$required_successes ]; then
+                echo \"  🎉 \$service_name is stable!\"
+                return 0
+              fi
+            else
+              success_count=0
+              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\"
+            fi
+            
+            if [ \$i -lt \$max_attempts ]; then
+              sleep 3
+            fi
+          done
+          
+          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\"
+          return 1
+        }
+        
+        # 서비스별 헬스체크 실행
+        overall_status=0
         
         # NGINX 프록시 헬스체크
-        echo \"Checking NGINX proxy (port 80)...\"
-        for i in \$(seq 1 10); do
-          status=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:80/status || true)
-          if [ \"\$status\" = \"200\" ]; then
-            echo \"✓ NGINX proxy OK on attempt \$i\"
-            break
-          fi
-          echo \"NGINX not ready (HTTP \$status). retry=\$i\"
-          sleep 5
-        done
+        if ! check_service \"NGINX Proxy\" \"80\" \"/status\"; then
+          overall_status=1
+          echo \"⚠️ NGINX proxy health check failed\"
+          # NGINX 로그 확인
+          echo \"📋 NGINX error logs (last 10 lines):\"
+          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\"
+        fi
         
-        # Blue 서버 헬스체크 (포트 3001)
-        echo \"Checking Blue server (port 3001)...\"
-        for i in \$(seq 1 10); do
-          status=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3001/health || true)
-          if [ \"\$status\" = \"200\" ]; then
-            echo \"✓ Blue server OK on attempt \$i\"
-            break
-          fi
-          echo \"Blue server not ready (HTTP \$status). retry=\$i\"
-          sleep 3
-        done
+        # Blue 서버 헬스체크
+        if ! check_service \"Blue Server\" \"3001\" \"/health\"; then
+          overall_status=1
+          echo \"⚠️ Blue server health check failed\"
+        fi
         
-        # Green 서버 헬스체크 (포트 3002)  
-        echo \"Checking Green server (port 3002)...\"
-        for i in \$(seq 1 10); do
-          status=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3002/health || true)
-          if [ \"\$status\" = \"200\" ]; then
-            echo \"✓ Green server OK on attempt \$i\"
-            exit 0
-          fi
-          echo \"Green server not ready (HTTP \$status). retry=\$i\"
-          sleep 3
-        done
+        # Green 서버 헬스체크
+        if ! check_service \"Green Server\" \"3002\" \"/health\"; then
+          overall_status=1
+          echo \"⚠️ Green server health check failed\"
+        fi
         
-        echo \"Health check failed after 10 tries\"
-        exit 1
+        # API 서버 헬스체크 (선택적)
+        if ! check_service \"API Server\" \"9000\" \"/health\"; then
+          echo \"⚠️ API server health check failed (non-critical)\"
+          # API 서버는 비필수이므로 overall_status에 영향 주지 않음
+        fi
+        
+        if [ \$overall_status -eq 0 ]; then
+          echo \"\"
+          echo \"🎉 All critical services are healthy!\"
+          echo \"✅ NGINX Proxy: Ready\"
+          echo \"✅ Blue Server: Ready\"
+          echo \"✅ Green Server: Ready\"
+          exit 0
+        else
+          echo \"\"
+          echo \"❌ Health check failed - some services are not ready\"
+          echo \"💡 Troubleshooting commands:\"
+          echo \"  sudo docker logs blue-green-nginx\"
+          echo \"  sudo docker exec blue-green-nginx ps aux\"
+          echo \"  sudo docker exec blue-green-nginx netstat -tlnp\"
+          exit 1
+        fi
       "'
 
 # 5) Switch traffic to GREEN — 원본 구조 유지, 스크립트 호출 방식으로 수정
@@ -315,7 +415,7 @@ switch-traffic-dev:
         echo \"✅ Traffic switched to Green\"
       "'
 
-# 6) Verify after switch — 엔드포인트 수정
+# 6) Verify after switch — 개선된 헬스체크 로직
 verify-dev:
   stage: verify-dev
   image: alpine:latest
@@ -324,23 +424,79 @@ verify-dev:
   script:
     - apk add --no-cache curl
     - |
-      echo "Verifying Blue-Green deployment switch..."
-      for i in $(seq 1 5); do
-        # 메인 프록시를 통한 접근 확인
-        code=$(curl -s -o /dev/null -w '%{http_code}' "http://$DEPLOY_SERVER_DEV/" || true)
-        echo "Main proxy attempt $i => HTTP $code"
+      echo "🔍 Verifying Blue-Green deployment switch..."
+      echo "⏳ Waiting for services to be fully ready..."
+      sleep 10
+      
+      # 개선된 헬스체크 로직
+      max_attempts=10
+      success_count=0
+      required_successes=2
+      
+      for i in $(seq 1 $max_attempts); do
+        echo "🔄 Health check attempt $i/$max_attempts..."
         
-        # Green 서버 직접 접근 확인
-        green_code=$(curl -s -o /dev/null -w '%{http_code}' "http://$DEPLOY_SERVER_DEV:3002/health" || true)  
-        echo "Green server attempt $i => HTTP $green_code"
+        # 메인 프록시 헬스체크 (타임아웃 증가)
+        main_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                         --max-time 10 --connect-timeout 5 \
+                         --retry 2 --retry-delay 1 \
+                         "http://$DEPLOY_SERVER_DEV/status" 2>/dev/null || echo "000")
+        echo "  📊 Main proxy (/status) => HTTP $main_code"
         
-        if [ "$code" = "200" ] && [ "$green_code" = "200" ]; then
-          echo "✓ Verification successful"
-          exit 0
+        # Green 서버 직접 헬스체크
+        green_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                          --max-time 10 --connect-timeout 5 \
+                          --retry 2 --retry-delay 1 \
+                          "http://$DEPLOY_SERVER_DEV:3002/health" 2>/dev/null || echo "000")
+        echo "  🟢 Green server => HTTP $green_code"
+        
+        # Blue 서버도 확인 (전체적인 상태 파악)
+        blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                         --max-time 10 --connect-timeout 5 \
+                         --retry 2 --retry-delay 1 \
+                         "http://$DEPLOY_SERVER_DEV:3001/health" 2>/dev/null || echo "000")
+        echo "  🔵 Blue server => HTTP $blue_code"
+        
+        # 성공 조건: 메인 프록시와 Green 서버 모두 200
+        if [ "$main_code" = "200" ] && [ "$green_code" = "200" ]; then
+          success_count=$((success_count + 1))
+          echo "  ✅ Success! ($success_count/$required_successes consecutive successes)"
+          
+          if [ $success_count -ge $required_successes ]; then
+            echo ""
+            echo "🎉 Verification completed successfully!"
+            echo "✅ Main proxy: HTTP $main_code"
+            echo "✅ Green server: HTTP $green_code" 
+            echo "ℹ️  Blue server: HTTP $blue_code"
+            exit 0
+          fi
+        else
+          success_count=0
+          echo "  ❌ Failed - resetting success count"
+          
+          # 디버깅 정보 출력
+          if [ "$main_code" != "200" ]; then
+            echo "    🔧 Main proxy issue - check NGINX configuration"
+          fi
+          if [ "$green_code" != "200" ]; then
+            echo "    🔧 Green server issue - check Node.js service"
+          fi
         fi
-        sleep 3
+        
+        # 마지막 시도가 아니면 대기
+        if [ $i -lt $max_attempts ]; then
+          echo "  ⏳ Waiting 5 seconds before next attempt..."
+          sleep 5
+        fi
       done
-      echo "✗ Verification failed"
+      
+      echo ""
+      echo "❌ Verification failed after $max_attempts attempts"
+      echo "💡 Troubleshooting suggestions:"
+      echo "  1. Check EC2 security groups allow ports 80, 3001, 3002"
+      echo "  2. Verify Docker containers are running: docker ps"
+      echo "  3. Check NGINX logs: docker logs blue-green-nginx"
+      echo "  4. Test manual connectivity: curl -v http://$DEPLOY_SERVER_DEV/status"
       exit 1
 
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
