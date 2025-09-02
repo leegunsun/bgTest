@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Comprehensive Health Check Script
-# Based on 새로운 판단 파일 recommendations1
+# Based on 새로운 판단 파일 recommendations
 #
 
 set -euo pipefail
