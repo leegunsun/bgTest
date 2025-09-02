@@ -39,10 +39,46 @@ cache:
   before_script:
     - apk add --no-cache bash openssh-client curl ca-certificates docker docker-compose
     - eval $(ssh-agent -s)
+    # Environment variables debugging
+    - echo "🔍 GitLab CI/CD Variables Debugging:"
+    - echo "- AWS_PEM_DEV exists:" $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- AWS_PEM_DEV length:" $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; else echo "0 (empty)"; fi)
+    - echo "- DEPLOY_SERVER_DEV exists:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEPLOY_SERVER_DEV value:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; else echo "(empty)"; fi)
+    - echo "- DEV_ENV_FILE exists:" $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEV_ENV_FILE length:" $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; else echo "0 (empty)"; fi)
+    - |
+      if [ -z "$AWS_PEM_DEV" ]; then
+        echo ""
+        echo "❌ ERROR: AWS_PEM_DEV variable not configured properly in GitLab CI/CD"
+        echo ""
+        echo "📋 GitLab CI/CD Variables Configuration Guide:"
+        echo "1. Go to: Project → Settings → CI/CD → Variables"
+        echo "2. Add these variables:"
+        echo "   - AWS_PEM_DEV (Type: File) - EC2 SSH private key content"
+        echo "   - DEPLOY_SERVER_DEV (Type: Variable) - EC2 IP/hostname" 
+        echo "   - DEV_ENV_FILE (Type: File) - Environment config file"
+        echo ""
+        echo "⚠️  Make sure to:"
+        echo "   - Set 'Protected' to ✅ for all variables"
+        echo "   - Set 'Masked' to ❌ for File type variables"
+        echo "   - Set 'Masked' to ✅ for Variable type (DEPLOY_SERVER_DEV)"
+        echo ""
+        echo "🔑 For AWS_PEM_DEV (File type):"
+        echo "   - Copy entire SSH private key including:"
+        echo "     -----BEGIN OPENSSH PRIVATE KEY-----"
+        echo "     [key content]"
+        echo "     -----END OPENSSH PRIVATE KEY-----"
+        echo ""
+        exit 1
+      fi
+    - echo "✅ All required environment variables are configured"
+    - echo "🔑 Setting up SSH key permissions..."
     - chmod 600 "$AWS_PEM_DEV"
     - ssh-add "$AWS_PEM_DEV"
     - mkdir -p ~/.ssh
     - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
+    - echo "✅ SSH setup completed successfully"
 
 # 1) Build — Node.js 환경용으로 수정
 build-dev:
