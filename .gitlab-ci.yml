@@ -149,8 +149,7 @@ test-dev:
 # 3) Remote deploy to Docker container — 핵심 수정 부분
 deploy-green-dev:
   stage: deploy-dev
-  <<: *alpine_docker_setup
-  <<: *rules_dev_main
+  <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["build-dev","test-dev"]
   dependencies: ["build-dev","test-dev"]
   environment:
@@ -278,8 +277,7 @@ deploy-green-dev:
 # 4) Health check — 개선된 헬스체크 로직
 health-check-dev:
   stage: health-check-dev
-  <<: *alpine_docker_setup
-  <<: *rules_dev_main
+  <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["deploy-green-dev"]
   retry: 2
   script:
@@ -383,8 +381,7 @@ health-check-dev:
 # 5) Switch traffic to GREEN — 원본 구조 유지, 스크립트 호출 방식으로 수정
 switch-traffic-dev:
   stage: switch-traffic-dev
-  <<: *alpine_docker_setup
-  <<: *rules_dev_main
+  <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["health-check-dev"]
   environment:
     name: production-dev
@@ -486,8 +483,7 @@ verify-dev:
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
 cleanup-dev:
   stage: cleanup-dev
-  <<: *alpine_docker_setup
-  <<: *rules_dev_main
+  <<: [*alpine_docker_setup, *rules_dev_main]
   needs: ["verify-dev"]
   when: manual  # 원본의 수동 실행 정책 유지
   allow_failure: true
@@ -504,8 +500,7 @@ cleanup-dev:
 # 7-b) Rollback to BLUE — 원본 구조 유지, 스크립트 호출 방식으로 수정
 rollback-to-blue-dev:
   stage: cleanup-dev
-  <<: *alpine_docker_setup
-  <<: *rules_dev_main
+  <<: [*alpine_docker_setup, *rules_dev_main]
   when: manual  # 원본의 수동 실행 정책 유지
   allow_failure: false
   environment:
@@ -517,4 +512,4 @@ rollback-to-blue-dev:
         echo \"Rolling back to Blue environment...\" &&
         sudo docker exec blue-green-nginx ./switch-deployment.sh blue &&
         echo \"✅ Rollback to Blue completed\"
-      "'"
+      "'
