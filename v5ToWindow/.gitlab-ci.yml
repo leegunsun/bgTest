@@ -39,10 +39,46 @@ cache:
   before_script:
     - apk add --no-cache bash openssh-client curl ca-certificates docker docker-compose
     - eval $(ssh-agent -s)
+    # Environment variables debugging
+    - echo "🔍 GitLab CI/CD Variables Debugging:"
+    - echo "- AWS_PEM_DEV exists:" $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- AWS_PEM_DEV length:" $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; else echo "0 (empty)"; fi)
+    - echo "- DEPLOY_SERVER_DEV exists:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEPLOY_SERVER_DEV value:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; else echo "(empty)"; fi)
+    - echo "- DEV_ENV_FILE exists:" $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEV_ENV_FILE length:" $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; else echo "0 (empty)"; fi)
+    - |
+      if [ -z "$AWS_PEM_DEV" ]; then
+        echo ""
+        echo "❌ ERROR: AWS_PEM_DEV variable not configured properly in GitLab CI/CD"
+        echo ""
+        echo "📋 GitLab CI/CD Variables Configuration Guide:"
+        echo "1. Go to: Project → Settings → CI/CD → Variables"
+        echo "2. Add these variables:"
+        echo "   - AWS_PEM_DEV (Type: File) - EC2 SSH private key content"
+        echo "   - DEPLOY_SERVER_DEV (Type: Variable) - EC2 IP/hostname" 
+        echo "   - DEV_ENV_FILE (Type: File) - Environment config file"
+        echo ""
+        echo "⚠️  Make sure to:"
+        echo "   - Set 'Protected' to ✅ for all variables"
+        echo "   - Set 'Masked' to ❌ for File type variables"
+        echo "   - Set 'Masked' to ✅ for Variable type (DEPLOY_SERVER_DEV)"
+        echo ""
+        echo "🔑 For AWS_PEM_DEV (File type):"
+        echo "   - Copy entire SSH private key including:"
+        echo "     -----BEGIN OPENSSH PRIVATE KEY-----"
+        echo "     [key content]"
+        echo "     -----END OPENSSH PRIVATE KEY-----"
+        echo ""
+        exit 1
+      fi
+    - echo "✅ All required environment variables are configured"
+    - echo "🔑 Setting up SSH key permissions..."
     - chmod 600 "$AWS_PEM_DEV"
     - ssh-add "$AWS_PEM_DEV"
     - mkdir -p ~/.ssh
     - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
+    - echo "✅ SSH setup completed successfully"
 
 # 1) Build — Node.js 환경용으로 수정
 build-dev:
@@ -86,9 +122,6 @@ build-dev:
       - ./rollback-to-blue.sh
       - ./cleanup-blue.sh
       - ./health-check.sh
-  only:
-    - dev
-    - main
 
 # 2) Test — Node.js 기본 테스트
 test-dev:
@@ -114,9 +147,6 @@ test-dev:
     expire_in: 3 days
     paths:
       - test-results/
-  only:
-    - dev
-    - main
 
 # 3) Remote deploy to Docker container — 핵심 수정 부분
 deploy-green-dev:
@@ -157,9 +187,6 @@ deploy-green-dev:
         docker-compose up -d &&
         echo \"Deployment completed\"
       "'
-  only:
-    - dev
-    - main
 
 # 4) Health check — 포트와 엔드포인트 수정
 health-check-dev:
@@ -212,9 +239,6 @@ health-check-dev:
         echo \"Health check failed after 10 tries\"
         exit 1
       "'
-  only:
-    - dev
-    - main
 
 # 5) Switch traffic to GREEN — 원본 구조 유지, 스크립트 호출 방식으로 수정
 switch-traffic-dev:
@@ -234,9 +258,6 @@ switch-traffic-dev:
         docker exec blue-green-nginx ./switch-deployment.sh green &&
         echo \"Traffic switched to Green\"
       "'
-  only:
-    - dev
-    - main
 
 # 6) Verify after switch — 엔드포인트 수정
 verify-dev:
@@ -265,9 +286,6 @@ verify-dev:
       done
       echo "✗ Verification failed"
       exit 1
-  only:
-    - dev
-    - main
 
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
 cleanup-dev:
@@ -286,9 +304,6 @@ cleanup-dev:
         echo \"Cleaning up inactive Blue environment...\" &&
         echo \"Blue environment cleanup completed (container-based)\"
       "'
-  only:
-    - dev
-    - main
 
 # 7-b) Rollback to BLUE — 원본 구조 유지, 스크립트 호출 방식으로 수정
 rollback-to-blue-dev:
@@ -306,7 +321,4 @@ rollback-to-blue-dev:
         echo \"Rolling back to Blue environment...\" &&
         docker exec blue-green-nginx ./switch-deployment.sh blue &&
         echo \"Rollback to Blue completed\"
-      "'
-  only:
-    - dev
-    - main
+      "'"
