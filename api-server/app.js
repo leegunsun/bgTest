@@ -73,6 +73,9 @@ const server = http.createServer((req, res) => {
     }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-    console.log(`API server running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🔧 API Server running on port ${PORT}`);
+    console.log(`📡 Health check: http://localhost:${PORT}/health`);
+    console.log(`🔵 Switch to Blue: POST http://localhost:${PORT}/switch/blue`);
+    console.log(`🟢 Switch to Green: POST http://localhost:${PORT}/switch/green`);
 });

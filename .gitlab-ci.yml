@@ -110,13 +110,16 @@ build-dev:
     expire_in: 3 days
     paths:
       - ./blue-server/
-      - ./green-server/  
+      - ./green-server/
+      - ./api-server/
       - ./nginx.conf
       - ./conf.d/
       - ./admin.html
       - ./docker-compose.yml
       - ./Dockerfile
       - ./.env
+      - ./start.sh
+      - ./switch-deployment.sh
       - ./deploy-green.sh
       - ./switch-to-green.sh
       - ./rollback-to-blue.sh
@@ -167,6 +170,7 @@ deploy-green-dev:
     # 전체 프로젝트 파일 복사
     - scp -r ./blue-server/           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./green-server/          "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./api-server/            "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./conf.d/                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./.env                      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/.env"
     - scp ./nginx.conf                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"

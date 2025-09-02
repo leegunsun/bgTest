@@ -36,7 +36,7 @@ node /app/green-server/app.js &
 GREEN_PID=$!
 
 echo "🔧 Starting API Server on port 9000..."
-node /app/api-server/app.js &
+cd /app/api-server && node app.js &
 API_PID=$!
 
 # 서버 준비 대기
