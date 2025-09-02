@@ -38,26 +38,16 @@ cache:
   services:
     - docker:dind
   before_script:
-    - apk add --no-cache bash openssh-client curl ca-certificates \
-        docker docker-compose
+    - apk add --no-cache bash openssh-client curl ca-certificates docker docker-compose
     - eval $(ssh-agent -s)
     # Environment variables debugging
     - echo "🔍 GitLab CI/CD Variables Debugging:"
-    - echo "- AWS_PEM_DEV exists:" \
-        $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- AWS_PEM_DEV length:" \
-        $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; \
-        else echo "0 (empty)"; fi)
-    - echo "- DEPLOY_SERVER_DEV exists:" \
-        $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEPLOY_SERVER_DEV value:" \
-        $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; \
-        else echo "(empty)"; fi)
-    - echo "- DEV_ENV_FILE exists:" \
-        $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEV_ENV_FILE length:" \
-        $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; \
-        else echo "0 (empty)"; fi)
+    - echo "- AWS_PEM_DEV exists:" $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- AWS_PEM_DEV length:" $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; else echo "0 (empty)"; fi)
+    - echo "- DEPLOY_SERVER_DEV exists:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEPLOY_SERVER_DEV value:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; else echo "(empty)"; fi)
+    - echo "- DEV_ENV_FILE exists:" $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
+    - echo "- DEV_ENV_FILE length:" $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; else echo "0 (empty)"; fi)
     - |
       if [ -z "$AWS_PEM_DEV" ]; then
         echo ""
@@ -102,8 +92,7 @@ build-dev:
     - echo "Building Node.js Blue-Green test environment..."
     # Node.js 의존성 설치 (있는 경우)
     - if [ -f "package.json" ]; then npm ci; fi
-    - if [ -f "package.json" ]; then \
-        npm run build || echo "No build script defined"; fi
+    - if [ -f "package.json" ]; then npm run build || echo "No build script defined"; fi
     - echo "Preparing test environment files..."
     - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
     - echo "Creating deployment script files..."
@@ -147,8 +136,7 @@ test-dev:
   script:
     - echo "Running Node.js tests for Blue-Green servers..."
     # Node.js 테스트 (있는 경우)
-    - if [ -f "package.json" ]; then \
-        npm test || echo "No test script defined"; fi
+    - if [ -f "package.json" ]; then npm test || echo "No test script defined"; fi
     - echo "Checking Blue/Green server syntax..."
     - node -c blue-server/app.js
     - node -c green-server/app.js
@@ -215,9 +203,7 @@ deploy-green-dev:
         # Docker Compose 설치 확인 및 자동 설치
         if ! command -v docker-compose &> /dev/null; then
           echo \"📦 Installing Docker Compose...\"
-          sudo curl -L \
-            \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" \
-            -o /usr/local/bin/docker-compose
+          sudo curl -L \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
           sudo chmod +x /usr/local/bin/docker-compose
           sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
           echo \"✅ Docker Compose installed successfully\"
@@ -283,8 +269,7 @@ health-check-dev:
 
         # 컨테이너 상태 확인
         echo \"📊 Docker container status:\"
-        sudo docker ps --filter name=blue-green-nginx \
-          --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
+        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\""
 
         # 개선된 헬스체크 로직
         check_service() {
@@ -334,9 +319,7 @@ health-check-dev:
           echo \"⚠️ NGINX proxy health check failed\"
           # NGINX 로그 확인
           echo \"📋 NGINX error logs (last 10 lines):\"
-          sudo docker exec blue-green-nginx \
-            tail -n 10 /var/log/nginx/error.log 2>/dev/null || \
-            echo \"No error logs found\""
+          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\""
         fi
 
         # Blue 서버 헬스체크
