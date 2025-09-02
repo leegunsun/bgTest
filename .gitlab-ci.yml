@@ -86,9 +86,6 @@ build-dev:
       - ./rollback-to-blue.sh
       - ./cleanup-blue.sh
       - ./health-check.sh
-  only:
-    - dev
-    - main
 
 # 2) Test — Node.js 기본 테스트
 test-dev:
@@ -114,9 +111,6 @@ test-dev:
     expire_in: 3 days
     paths:
       - test-results/
-  only:
-    - dev
-    - main
 
 # 3) Remote deploy to Docker container — 핵심 수정 부분
 deploy-green-dev:
@@ -157,9 +151,6 @@ deploy-green-dev:
         docker-compose up -d &&
         echo \"Deployment completed\"
       "'
-  only:
-    - dev
-    - main
 
 # 4) Health check — 포트와 엔드포인트 수정
 health-check-dev:
@@ -212,9 +203,6 @@ health-check-dev:
         echo \"Health check failed after 10 tries\"
         exit 1
       "'
-  only:
-    - dev
-    - main
 
 # 5) Switch traffic to GREEN — 원본 구조 유지, 스크립트 호출 방식으로 수정
 switch-traffic-dev:
@@ -234,9 +222,6 @@ switch-traffic-dev:
         docker exec blue-green-nginx ./switch-deployment.sh green &&
         echo \"Traffic switched to Green\"
       "'
-  only:
-    - dev
-    - main
 
 # 6) Verify after switch — 엔드포인트 수정
 verify-dev:
@@ -265,9 +250,6 @@ verify-dev:
       done
       echo "✗ Verification failed"
       exit 1
-  only:
-    - dev
-    - main
 
 # 7-a) Cleanup BLUE — 원본 구조 유지, Docker 환경용 수정
 cleanup-dev:
@@ -286,9 +268,6 @@ cleanup-dev:
         echo \"Cleaning up inactive Blue environment...\" &&
         echo \"Blue environment cleanup completed (container-based)\"
       "'
-  only:
-    - dev
-    - main
 
 # 7-b) Rollback to BLUE — 원본 구조 유지, 스크립트 호출 방식으로 수정
 rollback-to-blue-dev:
@@ -306,7 +285,4 @@ rollback-to-blue-dev:
         echo \"Rolling back to Blue environment...\" &&
         docker exec blue-green-nginx ./switch-deployment.sh blue &&
         echo \"Rollback to Blue completed\"
-      "'
-  only:
-    - dev
-    - main
+      "'"
