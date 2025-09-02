@@ -1112,7 +1112,7 @@ netstat -tlnp | grep -E ':(8081|8083)'
 
 # 3. GitLab에서 배포 파이프라인 실행
 # → 자동으로 Green 환경에 배포 (Gradle + JDK 19)
-# → Customized_BlueGreen_CI_CD_Pipeline.yml 사용
+# → Origin_Customized_BlueGreen_CI_CD_Pipeline.yml 사용
 
 # 4. 헬스체크 통과 후 수동 승인으로 트래픽 전환
 
