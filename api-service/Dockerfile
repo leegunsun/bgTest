@@ -1,0 +1,20 @@
+FROM node:18-alpine
+
+# Install required tools
+RUN apk add --no-cache curl bash dos2unix
+
+WORKDIR /app
+
+# Copy API server files
+COPY api-server/ ./
+
+# Windows → Linux compatibility
+RUN dos2unix ./app.js && chmod +x ./app.js
+
+# Health check
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=10s \
+  CMD curl -f http://localhost:9000/health || exit 1
+
+EXPOSE 9000
+
+CMD ["node", "app.js"]
