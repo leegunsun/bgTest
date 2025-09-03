@@ -132,12 +132,9 @@ detect-active-environment:
             echo "⚠️  No reliable detection, defaulting to: $CURRENT_ACTIVE"
           fi
           
-          # Determine deployment target (opposite of current)
-          if [ "$CURRENT_ACTIVE" = "blue" ]; then
-            DEPLOY_TARGET="green"
-          else
-            DEPLOY_TARGET="blue"
-          fi
+          # t2.micro optimization: Force green-only deployment
+          DEPLOY_TARGET="green"
+          echo "🎯 t2.micro mode: Forcing green-only deployment"
         else
           echo "⚠️  System not running, defaulting to green deployment"
           CURRENT_ACTIVE="blue"
@@ -182,19 +179,15 @@ deploy-to-inactive-environment:
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
         
-        # Get deployment target and set version
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        # t2.micro optimization: Force green-only deployment
+        DEPLOY_TARGET="green"
         DEPLOY_VERSION="'${DEPLOYMENT_VERSION}'"
-        echo "🎯 Deploying version $DEPLOY_VERSION to inactive environment: $DEPLOY_TARGET"
+        echo "🎯 Deploying version $DEPLOY_VERSION to $DEPLOY_TARGET environment (t2.micro single-env mode)"
         
-        # Set version environment variables
-        if [ "$DEPLOY_TARGET" = "blue" ]; then
-          export BLUE_VERSION="$DEPLOY_VERSION"
-          echo "BLUE_VERSION=$DEPLOY_VERSION" >> .env
-        else
-          export GREEN_VERSION="$DEPLOY_VERSION"
-          echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
-        fi
+        # Set green version (t2.micro single-env mode)
+        export GREEN_VERSION="$DEPLOY_VERSION"
+        echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
+        echo "🟢 t2.micro mode: Setting GREEN_VERSION=$DEPLOY_VERSION"
         
         # Ensure deployment metadata directory exists
         mkdir -p deployment_state
@@ -342,8 +335,8 @@ health-check-inactive-environment:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        echo "🎯 Health checking inactive $DEPLOY_TARGET environment..."
+        DEPLOY_TARGET="green"  # t2.micro: Force green-only mode
+        echo "🎯 Health checking $DEPLOY_TARGET environment (t2.micro single-env mode)..."
         
         # Comprehensive health check
         check_service() {
@@ -435,9 +428,9 @@ switch-traffic-to-inactive:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        DEPLOY_TARGET="green"  # t2.micro: Force green-only mode
         
-        echo "🚦 Switching traffic to $DEPLOY_TARGET environment..."
+        echo "🚦 Switching traffic to $DEPLOY_TARGET environment (t2.micro single-env mode)..."
         
         # Execute traffic switch via API
         switch_response=$(curl -s -X POST "http://localhost:9000/switch/$DEPLOY_TARGET" || echo "{\"success\":false}")
