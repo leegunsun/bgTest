@@ -248,15 +248,15 @@ deploy-to-inactive-environment:
           docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
           docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
           
-          echo "⏳ Waiting for all services to be ready..."
-          sleep 45
+          echo "⏳ Waiting for all services to be ready (t2.micro needs more time)..."
+          sleep 120
         fi
         
         # Verify deployment target is healthy with version validation
         echo "🏥 Health checking deployed $DEPLOY_TARGET environment..."
         TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
         
-        for i in $(seq 1 20); do
+        for i in $(seq 1 40); do
           if curl -f "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
             echo "✅ $DEPLOY_TARGET environment is healthy!"
             
@@ -269,13 +269,13 @@ deploy-to-inactive-environment:
             break
           fi
           
-          if [ $i -eq 20 ]; then
+          if [ $i -eq 40 ]; then
             echo "❌ $DEPLOY_TARGET environment failed to become healthy"
             exit 1
           fi
           
-          echo "⏳ Waiting for $DEPLOY_TARGET environment... ($i/20)"
-          sleep 5
+          echo "⏳ Waiting for $DEPLOY_TARGET environment... ($i/40)"
+          sleep 10
         done
         
         echo "🎉 Inactive environment deployment completed successfully with version tracking!"

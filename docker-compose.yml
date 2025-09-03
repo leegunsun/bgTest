@@ -34,16 +34,19 @@ services:
           - nginx-proxy
           - nginx
     restart: unless-stopped
+    mem_limit: 120m                              # Strict memory limit
+    memswap_limit: 120m                          # No swap usage
+    cpus: '0.2'                                  # Limit CPU usage
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/status"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout
+      retries: 3                                 # Fewer retries
+      start_period: 90s                          # Much longer startup time
     environment:
       - NGINX_RESOLVER=127.0.0.11  # Docker's internal DNS
 
-  # Blue Environment Application (Identical to Green)
+  # Blue Environment Application (t2.micro optimized)
   blue-app:
     build: 
       context: .
@@ -56,6 +59,7 @@ services:
       - VERSION=${BLUE_VERSION:-1.0.0}          # Dynamic version
       - DEPLOYMENT_ID=${BLUE_DEPLOYMENT_ID:-blue-default}
       - COLOR_THEME=blue                        # Visual distinction only
+      - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
     expose:
       - "3001"  # Internal network communication
     ports:
@@ -68,14 +72,17 @@ services:
           - blue-app
           - blue-server
     restart: unless-stopped
+    mem_limit: 150m                              # Strict memory limit
+    memswap_limit: 150m                          # No swap usage
+    cpus: '0.3'                                  # Limit CPU usage
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout
+      retries: 3                                 # Fewer retries
+      start_period: 60s                          # Longer startup time
 
-  # Green Environment Application (Identical to Blue)
+  # Green Environment Application (t2.micro optimized)
   green-app:
     build: 
       context: .
@@ -88,6 +95,7 @@ services:
       - VERSION=${GREEN_VERSION:-1.0.0}          # Dynamic version
       - DEPLOYMENT_ID=${GREEN_DEPLOYMENT_ID:-green-default}
       - COLOR_THEME=green                       # Visual distinction only
+      - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
     expose:
       - "3002"  # Internal network communication
     ports:
@@ -100,14 +108,17 @@ services:
           - green-app
           - green-server
     restart: unless-stopped
+    mem_limit: 150m                              # Strict memory limit
+    memswap_limit: 150m                          # No swap usage
+    cpus: '0.3'                                  # Limit CPU usage
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout
+      retries: 3                                 # Fewer retries
+      start_period: 60s                          # Longer startup time
 
-  # API Service for Deployment Control (HTTP API based - No Docker Socket)
+  # API Service for Deployment Control (t2.micro optimized)
   api-server:
     build: 
       context: ./api-service
@@ -126,48 +137,52 @@ services:
           - api-server
           - api
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    mem_limit: 100m                              # Strict memory limit
+    memswap_limit: 100m                          # No swap usage
+    cpus: '0.2'                                  # Limit CPU usage
     environment:
       - NO_DOCKER_SOCKET=true
-
-  # Zero-Downtime Monitoring Service
-  monitor:
-    build: 
-      context: ./monitoring
-      dockerfile: Dockerfile
-    container_name: deployment-monitor
-    hostname: deployment-monitor
-    environment:
-      - MONITOR_INTERVAL=5
-      - ALERT_THRESHOLD=3
-      - NGINX_URL=http://nginx-proxy:80
-      - BLUE_URL=http://blue-app:3001
-      - GREEN_URL=http://green-app:3002
-      - API_URL=http://api-server:9000
-    depends_on:
-      - nginx-proxy
-      - blue-app
-      - green-app
-      - api-server
-    networks:
-      bluegreen-network:
-        aliases:
-          - monitor
-          - deployment-monitor
-    restart: unless-stopped
-    volumes:
-      - monitoring_data:/app/data
-      - deployment_state:/app/deployment:ro     # Access to version info
+      - NODE_OPTIONS=--max-old-space-size=80     # Very limited memory for API
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "monitor"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9000/health"]
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout
+      retries: 2                                 # Fewer retries
+      start_period: 45s                          # Longer startup time
+
+  # Zero-Downtime Monitoring Service (DISABLED for t2.micro)
+  # monitor:
+  #   build: 
+  #     context: ./monitoring
+  #     dockerfile: Dockerfile
+  #   container_name: deployment-monitor
+  #   hostname: deployment-monitor
+  #   environment:
+  #     - MONITOR_INTERVAL=5
+  #     - ALERT_THRESHOLD=3
+  #     - NGINX_URL=http://nginx-proxy:80
+  #     - BLUE_URL=http://blue-app:3001
+  #     - GREEN_URL=http://green-app:3002
+  #     - API_URL=http://api-server:9000
+  #   depends_on:
+  #     - nginx-proxy
+  #     - blue-app
+  #     - green-app
+  #     - api-server
+  #   networks:
+  #     bluegreen-network:
+  #       aliases:
+  #         - monitor
+  #         - deployment-monitor
+  #   restart: unless-stopped
+  #   volumes:
+  #     - monitoring_data:/app/data
+  #     - deployment_state:/app/deployment:ro     # Access to version info
+  #   healthcheck:
+  #     test: ["CMD", "pgrep", "-f", "monitor"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
 
 networks:
   bluegreen-network:
