@@ -110,8 +110,8 @@ services:
   # API Service for Deployment Control (HTTP API based - No Docker Socket)
   api-server:
     build: 
-      context: .
-      dockerfile: api-service/Dockerfile
+      context: ./api-service
+      dockerfile: Dockerfile
     container_name: api-server
     hostname: api-server
     ports:
