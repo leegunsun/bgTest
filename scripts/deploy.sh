@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose-bluegreen.yml"
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 
 # Colors for output
 RED='\033[0;31m'
@@ -187,7 +187,7 @@ show_status() {
         warn "⚠️  System is not running"
         echo ""
         info "To start the system:"
-        echo "  docker-compose -f docker-compose-bluegreen.yml up -d"
+        echo "  docker-compose -f docker-compose.yml up -d"
     fi
 }
 

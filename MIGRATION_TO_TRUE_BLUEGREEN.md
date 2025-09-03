@@ -58,7 +58,7 @@ docker-compose down
 ### Step 3: Deploy New Architecture
 ```bash
 # Use the new separated architecture
-docker-compose -f docker-compose-bluegreen.yml up -d
+docker-compose -f docker-compose.yml up -d
 
 # Wait for all services to be ready
 sleep 30
@@ -67,16 +67,16 @@ sleep 30
 ### Step 4: Verify New System
 ```bash
 # Check system status
-./scripts/deploy-bluegreen-v2.sh status
+./scripts/deploy.sh status
 
 # Run zero-downtime test
-./scripts/deploy-bluegreen-v2.sh test 30
+./scripts/deploy.sh test 30
 ```
 
 ### Step 5: Update CI/CD Pipeline
 ```bash
 # Replace GitLab CI configuration
-cp .gitlab-ci-bluegreen.yml .gitlab-ci.yml
+cp .gitlab-ci.yml .gitlab-ci.yml
 ```
 
 ## 🛠️ New Commands
@@ -84,34 +84,34 @@ cp .gitlab-ci-bluegreen.yml .gitlab-ci.yml
 ### System Management
 ```bash
 # Start the system
-./scripts/deploy-bluegreen-v2.sh start
+./scripts/deploy.sh start
 
 # Check status
-./scripts/deploy-bluegreen-v2.sh status
+./scripts/deploy.sh status
 
 # Stop system
-./scripts/deploy-bluegreen-v2.sh stop
+./scripts/deploy.sh stop
 ```
 
 ### Deployment Operations
 ```bash
 # Deploy to specific environment (NO DOWNTIME)
-./scripts/deploy-bluegreen-v2.sh deploy green
+./scripts/deploy.sh deploy green
 
 # Switch traffic (NO DOWNTIME)
-./scripts/deploy-bluegreen-v2.sh switch green
+./scripts/deploy.sh switch green
 
 # Full Blue-Green deployment flow
-./scripts/deploy-bluegreen-v2.sh bluegreen
+./scripts/deploy.sh bluegreen
 ```
 
 ### Testing and Validation
 ```bash
 # Zero-downtime test (30 seconds)
-./scripts/deploy-bluegreen-v2.sh test
+./scripts/deploy.sh test
 
 # Extended test (60 seconds)
-./scripts/deploy-bluegreen-v2.sh test 60
+./scripts/deploy.sh test 60
 ```
 
 ## 📊 Monitoring and Validation
@@ -147,7 +147,7 @@ Update your GitLab CI/CD variables to use the new pipeline:
 # - DEV_ENV_FILE (File)
 
 # New CI/CD file:
-COMPOSE_FILE: "docker-compose-bluegreen.yml"
+COMPOSE_FILE: "docker-compose.yml"
 ```
 
 ### 3. Port Mapping Changes
@@ -194,7 +194,7 @@ If you need to rollback to the old system:
 
 ```bash
 # Emergency rollback to old system
-docker-compose -f docker-compose-bluegreen.yml down
+docker-compose -f docker-compose.yml down
 docker-compose -f docker-compose.old.yml up -d
 
 # Restore old CI/CD
@@ -210,7 +210,7 @@ cp .gitlab-ci.old.yml .gitlab-ci.yml
 **1. Services Won't Start**
 ```bash
 # Check logs
-docker-compose -f docker-compose-bluegreen.yml logs
+docker-compose -f docker-compose.yml logs
 
 # Verify network
 docker network inspect bluegreen-network
@@ -236,7 +236,7 @@ curl http://localhost:9000/status
 **4. Zero-Downtime Test Fails**
 ```bash
 # Run monitoring to identify issues
-./scripts/deploy-bluegreen-v2.sh test 10
+./scripts/deploy.sh test 10
 
 # Check monitoring logs
 docker logs deployment-monitor

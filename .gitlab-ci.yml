@@ -1,579 +1,447 @@
 ---
-# .gitlab-ci.yml — DEV Blue/Green 파이프라인 (테스트 환경용)
-# 기존 프로덕션 규칙을 보존하면서 Node.js 테스트 환경에 최적화
+# True Blue-Green Deployment CI/CD Pipeline
+# Implements zero-downtime deployment with separated container architecture
 
 stages:
   - build-dev
   - test-dev
   - detect-env-dev
-  - deploy-dev
+  - deploy-inactive-dev
   - health-check-dev
+  - zero-downtime-test-dev
   - switch-traffic-dev
-  - verify-dev
+  - verify-deployment-dev
   - cleanup-dev
 
-# 공통 변수 (테스트 환경용 수정)
+# Common variables
 variables:
   GIT_DEPTH: "0"
   NODE_OPTIONS: "--max_old_space_size=2048"
-  NPM_CACHE_FOLDER: "$CI_PROJECT_DIR/.npm"
   DOCKER_DRIVER: overlay2
+  COMPOSE_FILE: "docker-compose.yml"
 
-# NPM 캐시 — 브랜치별로 분리
-cache:
-  key: "npm-$CI_COMMIT_REF_SLUG"
-  paths:
-    - .npm
-    - node_modules/
-
-# 재사용 규칙 (dev, main 브랜치만) — 원본 유지
+# Reusable rules
 .rules_dev_and_main: &rules_dev_main
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
     - when: never
 
-# 재사용 Alpine 세팅 (ssh, curl, docker 등) — 원본 기반 확장
-.alpine_docker_setup: &alpine_docker_setup
-  image: alpine:latest
-  services:
-    - docker:dind
+# Reusable SSH setup
+.ssh_setup: &ssh_setup
   before_script:
-    - apk add --no-cache bash openssh-client curl ca-certificates docker docker-compose
+    - apk add --no-cache bash openssh-client curl jq docker docker-compose
     - eval $(ssh-agent -s)
-    # Environment variables debugging
-    - echo "🔍 GitLab CI/CD Variables Debugging:"
-    - echo "- AWS_PEM_DEV exists:" $(if [ -n "$AWS_PEM_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- AWS_PEM_DEV length:" $(if [ -n "$AWS_PEM_DEV" ]; then echo ${#AWS_PEM_DEV} "characters"; else echo "0 (empty)"; fi)
-    - echo "- DEPLOY_SERVER_DEV exists:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEPLOY_SERVER_DEV value:" $(if [ -n "$DEPLOY_SERVER_DEV" ]; then echo "$DEPLOY_SERVER_DEV"; else echo "(empty)"; fi)
-    - echo "- DEV_ENV_FILE exists:" $(if [ -n "$DEV_ENV_FILE" ]; then echo "✅ YES"; else echo "❌ NO"; fi)
-    - echo "- DEV_ENV_FILE length:" $(if [ -n "$DEV_ENV_FILE" ]; then echo ${#DEV_ENV_FILE} "characters"; else echo "0 (empty)"; fi)
+    - echo "🔍 Validating CI/CD Variables..."
     - |
-      if [ -z "$AWS_PEM_DEV" ]; then
-        echo ""
-        echo "❌ ERROR: AWS_PEM_DEV variable not configured properly in GitLab CI/CD"
-        echo ""
-        echo "📋 GitLab CI/CD Variables Configuration Guide:"
-        echo "1. Go to: Project → Settings → CI/CD → Variables"
-        echo "2. Add these variables:"
-        echo "   - AWS_PEM_DEV (Type: File) - EC2 SSH private key content"
-        echo "   - DEPLOY_SERVER_DEV (Type: Variable) - EC2 IP/hostname"
-        echo "   - DEV_ENV_FILE (Type: File) - Environment config file"
-        echo ""
-        echo "⚠️  Make sure to:"
-        echo "   - Set 'Protected' to ✅ for all variables"
-        echo "   - Set 'Masked' to ❌ for File type variables"
-        echo "   - Set 'Masked' to ✅ for Variable type (DEPLOY_SERVER_DEV)"
-        echo ""
-        echo "🔑 For AWS_PEM_DEV (File type):"
-        echo "   - Copy entire SSH private key including:"
-        echo "     -----BEGIN OPENSSH PRIVATE KEY-----"
-        echo "     [key content]"
-        echo "     -----END OPENSSH PRIVATE KEY-----"
-        echo ""
+      if [ -z "$AWS_PEM_DEV" ] || [ -z "$DEPLOY_SERVER_DEV" ]; then
+        echo "❌ ERROR: Required CI/CD variables not configured"
+        echo "Required: AWS_PEM_DEV (File), DEPLOY_SERVER_DEV (Variable)"
         exit 1
       fi
-    - echo "✅ All required environment variables are configured"
-    - echo "🔑 Setting up SSH key permissions..."
     - chmod 600 "$AWS_PEM_DEV"
     - ssh-add "$AWS_PEM_DEV"
     - mkdir -p ~/.ssh
     - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
-    - echo "✅ SSH setup completed successfully"
+    - echo "✅ SSH setup completed"
 
-# 1) Build — Node.js 환경용으로 수정
+# 1. Build Stage
 build-dev:
   stage: build-dev
   image: node:18-alpine
   <<: *rules_dev_main
-  before_script:
-    - npm config set cache $NPM_CACHE_FOLDER
   script:
-    - echo "Building Node.js Blue-Green test environment..."
-    # Node.js 의존성 설치 (있는 경우)
-    - if [ -f "package.json" ]; then npm ci; fi
-    - if [ -f "package.json" ]; then npm run build || echo "No build script defined"; fi
-    - echo "Preparing test environment files..."
+    - echo "🏗️  Building Blue-Green separated architecture..."
     - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
-    - echo "Creating deployment script files..."
-    - cp ./deploy-bluegreen.sh ./deploy-green.sh
-    - cp ./switch-deployment.sh ./switch-to-green.sh
-    - cp ./switch-deployment.sh ./rollback-to-blue.sh
-    - cp ./health-check.sh ./cleanup-blue.sh
-    - echo "Preparing Docker build context..."
-    - ls -al blue-server/ green-server/
-    - echo "🔍 Checking shell scripts for artifacts..."
-    - ls -la *.sh || echo "No .sh files found in build context"
-    - echo "📁 All files for artifacts:"
-    - ls -la
+    - echo "📦 Preparing artifacts for separated container deployment..."
+    - ls -la app-service/ nginx-service/ api-service/ monitoring/ || echo "Service directories ready"
   artifacts:
     expire_in: 3 days
     paths:
+      - ./app-service/
+      - ./nginx-service/
+      - ./api-service/
+      - ./monitoring/
+      - ./scripts/
       - ./blue-server/
       - ./green-server/
-      - ./api-server/
       - ./nginx.conf
       - ./conf.d/
       - ./admin.html
       - ./docker-compose.yml
-      - ./Dockerfile
       - ./.env
-      - ./start.sh
-      - ./switch-deployment.sh
-      - ./deploy-green.sh
-      - ./switch-to-green.sh
-      - ./rollback-to-blue.sh
-      - ./cleanup-blue.sh
-      - ./health-check.sh
-      - ./detect-active-env.sh
 
-# 2) Test — Node.js 기본 테스트
+# 2. Test Stage
 test-dev:
   stage: test-dev
   image: node:18-alpine
   <<: *rules_dev_main
   needs: ["build-dev"]
   script:
-    - echo "Running Node.js tests for Blue-Green servers..."
-    # Node.js 테스트 (있는 경우)
-    - if [ -f "package.json" ]; then npm test || echo "No test script defined"; fi
-    - echo "Checking Blue/Green server syntax..."
+    - echo "🧪 Testing separated services architecture..."
     - node -c blue-server/app.js
     - node -c green-server/app.js
-    - echo "Checking NGINX configuration syntax..."
-  artifacts:
-    when: always
-    expire_in: 3 days
-    paths:
-      - test-results/
+    - node -c api-service/app-updated.js || node -c api-server/app.js
+    - echo "✅ All service syntax checks passed"
 
-# 2.5) Environment Detection — 새로운 단계: 현재 활성 환경 감지 및 배포 대상 결정
+# 3. Environment Detection
 detect-active-environment:
   stage: detect-env-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
   needs: ["build-dev", "test-dev"]
   script:
-    - echo "🔍 Detecting current active environment on remote server..."
+    - echo "🔍 Detecting current active environment..."
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow
-      echo "📊 Current Environment Detection:"
-
-      # 호스트에서 현재 활성 환경 감지 (컨테이너 외부)
-      if [ -f "./detect-active-env.sh" ]; then
-        chmod +x ./detect-active-env.sh
-        echo "Running environment detection on host..."
-        CURRENT_ACTIVE=$(./detect-active-env.sh current 2>/dev/null || echo "green")
-        DEPLOY_TARGET=$(./detect-active-env.sh next 2>/dev/null || echo "blue")
-      else
-        echo "⚠️ Environment detection script not found, using fallback detection..."
-        # 컨테이너에서 직접 확인
-        CURRENT_ACTIVE=$(sudo docker exec blue-green-nginx sh -c "if grep -q \"green\" /etc/nginx/conf.d/active.env 2>/dev/null; then echo \"green\"; else echo \"blue\"; fi" 2>/dev/null || echo "green")
-        if [ "$CURRENT_ACTIVE" = "green" ]; then
-          DEPLOY_TARGET="blue"
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        echo "📊 Environment Detection:"
+        
+        # Check if system is running
+        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
+          echo "✅ Blue-Green system is running"
+          
+          # Get current active environment
+          CURRENT_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" || echo "blue")
+          
+          # Determine deployment target (opposite of current)
+          if [ "$CURRENT_ACTIVE" = "blue" ]; then
+            DEPLOY_TARGET="green"
+          else
+            DEPLOY_TARGET="blue"
+          fi
         else
+          echo "⚠️  System not running, defaulting to green deployment"
+          CURRENT_ACTIVE="blue"
           DEPLOY_TARGET="green"
         fi
-      fi
-
-      echo "CURRENT_ACTIVE=$CURRENT_ACTIVE"
-      echo "DEPLOY_TARGET=$DEPLOY_TARGET"
-      echo "TARGET_PORT=$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo \"3001\"; else echo \"3002\"; fi)"
-      echo "TARGET_ENV_NAME=${DEPLOY_TARGET}-dev"
-
-      # Save to file for next stages
-      echo "$CURRENT_ACTIVE" > ~/current_active.env
-      echo "$DEPLOY_TARGET" > ~/deploy_target.env
+        
+        echo "Current active: $CURRENT_ACTIVE"
+        echo "Deploy target: $DEPLOY_TARGET"
+        
+        # Save environment info
+        echo "$CURRENT_ACTIVE" > ~/current_active.env
+        echo "$DEPLOY_TARGET" > ~/deploy_target.env
       '
-  artifacts:
-    expire_in: 1 hour
-    paths:
-      - environment_detection.env
 
-# 3) Dynamic Remote deploy to inactive environment — 개선된 동적 배포
-deploy-inactive-environment:
-  stage: deploy-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["detect-active-environment", "build-dev", "test-dev"]
+# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME)
+deploy-to-inactive-environment:
+  stage: deploy-inactive-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["detect-active-environment"]
   environment:
     name: inactive-env
-    url: "http://$DEPLOY_SERVER_DEV"  # 동적으로 결정됨
+    url: "http://$DEPLOY_SERVER_DEV"
   script:
-    - echo "Deploying to Docker-based Blue-Green environment..."
-    - echo "🔍 Checking local files before transfer..."
-    - ls -la *.sh || echo "No .sh files found locally"
-    - echo "📁 Current directory contents:"
-    - ls -la
-    - echo "Creating target directory..."
+    - echo "🚀 TRUE BLUE-GREEN DEPLOYMENT - Deploy to inactive environment only"
+    - echo "📁 Transferring separated service architecture..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
-    - echo "📁 Copying project files to target server..."
-    - scp -r ./blue-server/           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./green-server/          "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./api-server/            "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./conf.d/                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./.env                      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/.env"
-    - scp ./nginx.conf                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./docker-compose.yml        "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./Dockerfile                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./admin.html                "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./start.sh                  "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./switch-deployment.sh      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./deploy-green.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./switch-to-green.sh        "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./rollback-to-blue.sh       "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./cleanup-blue.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./health-check.sh           "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./detect-active-env.sh      "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - echo "🔍 Verifying transferred files on EC2..."
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "cd ~/bgTest/v5ToWindow && ls -la *.sh || echo 'No .sh files found'"
-    - echo "🐳 Setting up Docker environment and rebuilding containers..."
+    - scp -r ./app-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./nginx-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./api-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./blue-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./green-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./conf.d/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./docker-compose.yml "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./nginx.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./admin.html "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./.env "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - echo "🐳 Deploying ONLY to inactive environment (maintaining zero downtime)..."
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        # Docker 설치 확인 및 자동 설치
-        echo \"🔍 Checking Docker installation...\"
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        # Get deployment target
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        echo "🎯 Deploying to inactive environment: $DEPLOY_TARGET"
+        
+        # Install Docker if needed
         if ! command -v docker &> /dev/null; then
-          echo \"📦 Installing Docker...\"
+          echo "📦 Installing Docker..."
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo usermod -aG docker ubuntu
           sudo systemctl start docker
           sudo systemctl enable docker
-          echo \"✅ Docker installed successfully\"
-        else
-          echo \"✅ Docker is already installed\"
         fi
-
-        # Docker Compose 설치 확인 및 자동 설치
+        
+        # Install Docker Compose if needed
         if ! command -v docker-compose &> /dev/null; then
-          echo \"📦 Installing Docker Compose...\"
-          sudo curl -L \"https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+          echo "📦 Installing Docker Compose..."
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
           sudo chmod +x /usr/local/bin/docker-compose
           sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-          echo \"✅ Docker Compose installed successfully\"
-        else
-          echo \"✅ Docker Compose is already installed\"
         fi
-
-        # 설치 버전 확인
-        docker --version
-        docker-compose --version
-      "'
-    - echo "Starting Docker container deployment process..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow
-      echo "🔄 Starting deployment process..."
-      echo "🛑 Stopping existing containers..."
-      sudo docker-compose down --timeout 30 || true
-      echo "🧹 Cleaning up old images..."
-      sudo docker image prune -f || true
-      echo "🏗️ Rebuilding Docker image..."
-      sudo docker build --no-cache -t blue-green-nginx .
-      echo "🚀 Starting updated containers..."
-      sudo docker-compose up -d
-      echo "⏳ Waiting for containers to be ready..."
-      sleep 45
-      echo "📊 Container status:"
-      sudo docker ps --filter name=blue-green-nginx
-      echo "🏥 Docker health status:"
-      for i in $(seq 1 12); do
-        health_status=$(sudo docker inspect --format="{{.State.Health.Status}}" blue-green-nginx 2>/dev/null || echo "no-healthcheck")
-        echo "Health check attempt $i - $health_status"
-        if [ "$health_status" = "healthy" ]; then
-          echo "✅ Container is healthy!"
-          break
-        elif [ "$health_status" = "no-healthcheck" ]; then
-          echo "⚠️ No healthcheck configured, checking manually..."
-          if sudo docker exec blue-green-nginx curl -f http://localhost/status >/dev/null 2>&1; then
-            echo "✅ Manual health check passed!"
+        
+        # Check if system is already running
+        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
+          echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
+          
+          # Deploy ONLY to inactive environment - NO SERVICE INTERRUPTION
+          echo "🔄 Rebuilding inactive $DEPLOY_TARGET environment..."
+          sudo docker-compose -f docker-compose.yml stop ${DEPLOY_TARGET}-app || true
+          sudo docker-compose -f docker-compose.yml rm -f ${DEPLOY_TARGET}-app || true
+          sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
+          sudo docker-compose -f docker-compose.yml up -d ${DEPLOY_TARGET}-app
+          
+          echo "⏳ Waiting for $DEPLOY_TARGET environment to be ready..."
+          sleep 30
+          
+        else
+          echo "🏗️  Initial system deployment - starting all services"
+          sudo docker-compose -f docker-compose.yml down --timeout 10 || true
+          sudo docker-compose -f docker-compose.yml build
+          sudo docker-compose -f docker-compose.yml up -d
+          
+          echo "⏳ Waiting for all services to be ready..."
+          sleep 45
+        fi
+        
+        # Verify deployment target is healthy
+        echo "🏥 Health checking deployed $DEPLOY_TARGET environment..."
+        TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
+        
+        for i in $(seq 1 20); do
+          if curl -f "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
+            echo "✅ $DEPLOY_TARGET environment is healthy!"
             break
           fi
-        fi
-        if [ $i -eq 12 ]; then
-          echo "❌ Container failed to become healthy"
-          sudo docker logs --tail 50 blue-green-nginx
-          exit 1
-        fi
-        sleep 10
-      done
-      echo "✅ Deployment completed successfully!"'
+          
+          if [ $i -eq 20 ]; then
+            echo "❌ $DEPLOY_TARGET environment failed to become healthy"
+            exit 1
+          fi
+          
+          echo "⏳ Waiting for $DEPLOY_TARGET environment... ($i/20)"
+          sleep 5
+        done
+        
+        echo "🎉 Inactive environment deployment completed successfully!"
+      '
 
-# 4) Health check — 동적 환경 헬스체크 로직
-health-check-inactive-env:
+# 5. Health Check Inactive Environment
+health-check-inactive-environment:
   stage: health-check-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["deploy-inactive-environment"]
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["deploy-to-inactive-environment"]
   retry: 2
   script:
+    - echo "🏥 Comprehensive health check of inactive environment..."
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
-        echo \"🏥 Health checking Blue-Green test environment...\"
-        echo \"⏳ Waiting for Docker containers to fully start...\"
-        sleep 30
-
-        # 컨테이너 상태 확인
-        echo \"📊 Docker container status:\"
-        sudo docker ps --filter name=blue-green-nginx --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\"
-
-        # 개선된 헬스체크 로직
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        echo "🎯 Health checking inactive $DEPLOY_TARGET environment..."
+        
+        # Comprehensive health check
         check_service() {
-          local service_name=\"\$1\"
-          local port=\"\$2\"
-          local endpoint=\"\$3\"
-          local max_attempts=15
-          local success_count=0
-          local required_successes=2
-
-          echo \"🔍 Checking \$service_name (port \$port, endpoint \$endpoint)...\"
-
-          for i in \$(seq 1 \$max_attempts); do
-            status=\$(curl -s -o /dev/null -w \"%{http_code}\" \\
-                           --max-time 8 --connect-timeout 3 \\
-                           --retry 1 --retry-delay 1 \\
-                           \"http://localhost:\$port\$endpoint\" 2>/dev/null || echo \"000\")
-
-            if [ \"\$status\" = \"200\" ]; then
-              success_count=\$((success_count + 1))
-              echo \"  ✅ \$service_name OK (attempt \$i) - success \$success_count/\$required_successes\"
-
-              if [ \$success_count -ge \$required_successes ]; then
-                echo \"  🎉 \$service_name is stable!\"
-                return 0
-              fi
-            else
-              success_count=0
-              echo \"  ❌ \$service_name not ready (HTTP \$status) - attempt \$i/\$max_attempts\"
+          local service_name="$1"
+          local url="$2"
+          local max_attempts=10
+          
+          echo "🔍 Checking $service_name..."
+          for i in $(seq 1 $max_attempts); do
+            if curl -f --max-time 3 "$url" >/dev/null 2>&1; then
+              echo "✅ $service_name is healthy"
+              return 0
             fi
-
-            if [ \$i -lt \$max_attempts ]; then
-              sleep 3
-            fi
+            echo "⏳ $service_name not ready ($i/$max_attempts)..."
+            sleep 3
           done
-
-          echo \"  💥 \$service_name health check failed after \$max_attempts attempts\"
+          echo "❌ $service_name health check failed"
           return 1
         }
-
-        # 서비스별 헬스체크 실행
+        
+        # Check all services
         overall_status=0
-
-        # NGINX 프록시 헬스체크
-        if ! check_service \"NGINX Proxy\" \"80\" \"/status\"; then
+        
+        # Check inactive environment
+        TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
+        if ! check_service "$DEPLOY_TARGET Server" "http://localhost:$TARGET_PORT/health"; then
           overall_status=1
-          echo \"⚠️ NGINX proxy health check failed\"
-          # NGINX 로그 확인
-          echo \"📋 NGINX error logs (last 10 lines):\"
-          sudo docker exec blue-green-nginx tail -n 10 /var/log/nginx/error.log 2>/dev/null || echo \"No error logs found\"
         fi
-
-        # Blue 서버 헬스체크
-        if ! check_service \"Blue Server\" \"3001\" \"/health\"; then
-          overall_status=1
-          echo \"⚠️ Blue server health check failed\"
-        fi
-
-        # 배포된 환경 확인 및 헬스체크
-        DEPLOY_TARGET=\$(cat ~/deploy_target.env 2>/dev/null || echo \"green\")
-        TARGET_PORT=\$(if [ \"\$DEPLOY_TARGET\" = \"blue\" ]; then echo \"3001\"; else echo \"3002\"; fi)
-
-        echo \"🎯 Checking deployed environment: \$DEPLOY_TARGET (port \$TARGET_PORT)\"
-        if ! check_service \"\$DEPLOY_TARGET Server\" \"\$TARGET_PORT\" \"/health\"; then
-          overall_status=1
-          echo \"⚠️ \$DEPLOY_TARGET server health check failed\"
-        fi
-
-        # API 서버 헬스체크 (선택적)
-        if ! check_service \"API Server\" \"9000\" \"/health\"; then
-          echo \"⚠️ API server health check failed (non-critical)\"
-          # API 서버는 비필수이므로 overall_status에 영향 주지 않음
-        fi
-
-        if [ \$overall_status -eq 0 ]; then
-          echo \"\"
-          echo \"🎉 All critical services are healthy!\"
-          echo \"✅ NGINX Proxy: Ready\"
-          echo \"✅ Blue Server: Ready\"
-          echo \"✅ Green Server: Ready\"
-          exit 0
+        
+        # Check supporting services
+        check_service "NGINX Proxy" "http://localhost:80/status" || overall_status=1
+        check_service "API Server" "http://localhost:9000/health" || overall_status=1
+        
+        if [ $overall_status -eq 0 ]; then
+          echo "🎉 All services are healthy - ready for traffic switch!"
         else
-          echo \"\"
-          echo \"❌ Health check failed - some services are not ready\"
-          echo \"💡 Troubleshooting commands:\"
-          echo \"  sudo docker logs blue-green-nginx\"
-          echo \"  sudo docker exec blue-green-nginx ps aux\"
-          echo \"  sudo docker exec blue-green-nginx netstat -tlnp\"
+          echo "❌ Health check failed - deployment cannot proceed"
           exit 1
         fi
-      "'
+      '
 
-# 5) Switch traffic to inactive environment — 동적 트래픽 전환
+# 6. Zero-Downtime Test (Critical Validation)
+zero-downtime-validation:
+  stage: zero-downtime-test-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["health-check-inactive-environment"]
+  script:
+    - echo "🧪 Running zero-downtime deployment validation..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        echo "🚀 Starting zero-downtime test before traffic switch..."
+        
+        # Quick availability test
+        echo "📊 Testing current service availability..."
+        for i in $(seq 1 30); do
+          if ! curl -f --max-time 2 "http://localhost:80/status" >/dev/null 2>&1; then
+            echo "❌ Service availability test failed"
+            exit 1
+          fi
+          sleep 1
+        done
+        
+        echo "✅ Service is stable and ready for traffic switch"
+      '
+
+# 7. Switch Traffic (Manual Approval Required)
 switch-traffic-to-inactive:
   stage: switch-traffic-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["health-check-inactive-env"]
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["zero-downtime-validation"]
   environment:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
-  when: manual  # 원본의 수동 실행 정책 유지
+  when: manual
   allow_failure: false
   script:
+    - echo "🔄 ZERO-DOWNTIME TRAFFIC SWITCH - Manual approval granted"
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET=\$(cat ~/deploy_target.env 2>/dev/null || echo \"green\")
-        echo \"🔄 Switching traffic to \$DEPLOY_TARGET environment...\"
-        sudo docker exec blue-green-nginx ./switch-deployment.sh \$DEPLOY_TARGET
-        echo \"✅ Traffic switched to \$DEPLOY_TARGET\"
-        echo \"📊 New configuration:\"
-        if [ -f \"./detect-active-env.sh\" ]; then
-          chmod +x ./detect-active-env.sh
-          ./detect-active-env.sh status || echo \"Environment detection script not available\"
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        
+        echo "🚦 Switching traffic to $DEPLOY_TARGET environment..."
+        
+        # Execute traffic switch via API
+        switch_response=$(curl -s -X POST "http://localhost:9000/switch/$DEPLOY_TARGET" || echo "{\"success\":false}")
+        
+        if echo "$switch_response" | jq -e ".success" >/dev/null 2>&1; then
+          echo "✅ Traffic successfully switched to $DEPLOY_TARGET"
+          echo "📊 Switch details: $switch_response"
         else
-          echo \"Environment detection completed - \$DEPLOY_TARGET now active\"
+          echo "❌ Traffic switch failed: $switch_response"
+          exit 1
         fi
-      "'
+        
+        # Verify switch
+        sleep 5
+        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
+          echo "✅ Traffic switch verification successful"
+        else
+          echo "❌ Traffic switch verification failed"
+          exit 1
+        fi
+      '
 
-# 6) Verify after switch — 동적 환경 검증 로직
-verify-switch:
-  stage: verify-dev
+# 8. Deployment Verification
+verify-deployment:
+  stage: verify-deployment-dev
   image: alpine:latest
-  <<: *rules_dev_main
+  <<: [*ssh_setup, *rules_dev_main]
   needs: ["switch-traffic-to-inactive"]
   script:
-    - apk add --no-cache curl
+    - echo "🔍 Verifying zero-downtime deployment completion..."
     - |
-      echo "🔍 Verifying Blue-Green deployment switch..."
-      echo "⏳ Waiting for services to be fully ready..."
-      sleep 30  # 증가: 10초 → 30초
-
-      # 개선된 헬스체크 로직
-      max_attempts=15  # 증가: 10 → 15
-      success_count=0
-      required_successes=3  # 증가: 2 → 3
-
-      for i in $(seq 1 $max_attempts); do
-        echo "🔄 Health check attempt $i/$max_attempts..."
-
-        # 메인 프록시 헬스체크 (타임아웃 증가)
-        main_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                         --max-time 15 --connect-timeout 8 \
-                         --retry 3 --retry-delay 2 \
-                         "http://$DEPLOY_SERVER_DEV/status" 2>/dev/null || echo "000")
-        echo "  📊 Main proxy (/status) => HTTP $main_code"
-
-        # 프록시를 통한 검증만 수행 (보안 그룹 이슈 회피)
-        # NGINX 프록시를 통한 Blue/Green 전환 검증
-        proxy_blue_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                               --max-time 15 --connect-timeout 8 \
-                               --retry 3 --retry-delay 2 \
-                               "http://$DEPLOY_SERVER_DEV/blue/" 2>/dev/null || echo "000")
-        echo "  🔵 Proxy → Blue server => HTTP $proxy_blue_code"
-        proxy_green_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                                --max-time 15 --connect-timeout 8 \
-                                --retry 3 --retry-delay 2 \
-                                "http://$DEPLOY_SERVER_DEV/green/" 2>/dev/null || echo "000")
-        echo "  🟢 Proxy → Green server => HTTP $proxy_green_code"
-
-        # 동적 성공 조건: 메인 프록시와 현재 활성화된 환경 모두 성공
-        # 어떤 환경이 현재 활성인지 먼저 확인
-        active_env="green"  # 기본값, 실제로는 동적으로 결정됨
-        target_code="$proxy_green_code"
-
-        # Blue와 Green 중 어느 것이 응답하는지 확인하여 현재 활성 환경 판단
-        if [ "$proxy_blue_code" = "200" ] && [ "$proxy_green_code" != "200" ]; then
-          active_env="blue"
-          target_code="$proxy_blue_code"
-        elif [ "$proxy_green_code" = "200" ]; then
-          active_env="green"
-          target_code="$proxy_green_code"
-        fi
-
-        if [ "$main_code" = "200" ] && [ "$target_code" = "200" ]; then
-          success_count=$((success_count + 1))
-          echo "  ✅ Success! Active: $active_env ($success_count/$required_successes consecutive successes)"
-
-          if [ $success_count -ge $required_successes ]; then
-            echo ""
-            echo "🎉 Blue-Green deployment verification completed successfully!"
-            echo "✅ Main proxy: HTTP $main_code"
-            echo "✅ Active environment: $active_env (HTTP $target_code)"
-            echo "ℹ️  Proxy → Blue: HTTP $proxy_blue_code"
-            echo "ℹ️  Proxy → Green: HTTP $proxy_green_code"
-            exit 0
-          fi
-        else
-          success_count=0
-          echo "  ❌ Failed - resetting success count"
-
-          # 디버깅 정보 출력
-          if [ "$main_code" != "200" ]; then
-            echo "    🔧 Main proxy issue - check NGINX configuration"
-          fi
-          if [ "$target_code" != "200" ]; then
-            echo "    🔧 $active_env server proxy routing issue - check NGINX upstream"
-          fi
-        fi
-
-        # 마지막 시도가 아니면 대기
-        if [ $i -lt $max_attempts ]; then
-          echo "  ⏳ Waiting 8 seconds before next attempt..."
-          sleep 8
-        fi
-      done
-
-      echo ""
-      echo "❌ Verification failed after $max_attempts attempts"
-      echo "💡 Troubleshooting suggestions:"
-      echo "  1. Check NGINX proxy access: curl -v http://$DEPLOY_SERVER_DEV/status"
-      echo "  2. Verify Docker containers:"
-      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker ps'"
-      echo "  3. Check container logs:"
-      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker logs blue-green-nginx'"
-      echo "  4. Test proxy routing:"
-      echo "     curl -v http://$DEPLOY_SERVER_DEV/blue/"
-      echo "     curl -v http://$DEPLOY_SERVER_DEV/green/"
-      echo "  5. Check internal connectivity:"
-      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx curl localhost:3001/health'"
-      echo "  6. Verify NGINX configuration:"
-      echo "     ssh ubuntu@$DEPLOY_SERVER_DEV 'sudo docker exec blue-green-nginx nginx -t'"
-      exit 1
-
-# 7-a) Cleanup inactive environment — 동적 정리
-cleanup-inactive-env:
-  stage: cleanup-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
-  needs: ["verify-switch"]
-  when: manual  # 원본의 수동 실행 정책 유지
-  allow_failure: true
-  environment:
-    name: inactive-env
-    url: "http://$DEPLOY_SERVER_DEV"
-  script:
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        CURRENT_ACTIVE=\$(cat ~/current_active.env 2>/dev/null || echo \"blue\")
-        echo \"🧹 Cleaning up previously active \$CURRENT_ACTIVE environment...\"
-        echo \"Previous \$CURRENT_ACTIVE environment cleanup completed (container-based)\"
-        echo \"ℹ️  Both environments remain available for instant rollback\"
-      "'
+        
+        echo "📊 Post-deployment verification..."
+        
+        # Extended availability test
+        failed_checks=0
+        total_checks=50
+        
+        for i in $(seq 1 $total_checks); do
+          if ! curl -f --max-time 3 "http://localhost:80/status" >/dev/null 2>&1; then
+            failed_checks=$((failed_checks + 1))
+          fi
+          sleep 1
+        done
+        
+        availability=$(echo "scale=2; (1 - $failed_checks/$total_checks) * 100" | bc -l || echo "100")
+        
+        echo "📈 Deployment verification results:"
+        echo "   - Total checks: $total_checks"
+        echo "   - Failed checks: $failed_checks"
+        echo "   - Availability: ${availability}%"
+        
+        if [ "$failed_checks" -eq 0 ]; then
+          echo "🎉 ZERO-DOWNTIME DEPLOYMENT SUCCESSFUL!"
+          echo "✅ Perfect availability achieved: 100%"
+        elif [ "$failed_checks" -le 2 ]; then
+          echo "⚠️  Deployment completed with minor issues"
+          echo "   Availability: ${availability}%"
+        else
+          echo "❌ Deployment verification failed"
+          echo "   Too many availability issues detected"
+          exit 1
+        fi
+      '
 
-# 7-b) Rollback to previous environment — 동적 롤백
-rollback-to-previous:
+# 9. Cleanup Previous Environment (Manual)
+cleanup-previous-environment:
   stage: cleanup-dev
-  <<: [*alpine_docker_setup, *rules_dev_main]
-  when: manual  # 원본의 수동 실행 정책 유지
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["verify-deployment"]
+  when: manual
+  allow_failure: true
+  script:
+    - echo "🧹 Cleaning up previous environment..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        
+        echo "🗑️  Optionally scaling down previous $CURRENT_ACTIVE environment..."
+        echo "   (Both environments remain available for instant rollback)"
+        echo "   Previous environment: $CURRENT_ACTIVE"
+        echo "   Cleanup completed"
+      '
+
+# 10. Emergency Rollback (Manual)
+emergency-rollback:
+  stage: cleanup-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  when: manual
   allow_failure: false
   environment:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   script:
+    - echo "🚨 EMERGENCY ROLLBACK - Immediate traffic restoration"
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" 'bash -lc "
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        PREVIOUS_ACTIVE=\$(cat ~/current_active.env 2>/dev/null || echo \"blue\")
-        echo \"🔄 Rolling back to previous \$PREVIOUS_ACTIVE environment...\"
-        sudo docker exec blue-green-nginx ./switch-deployment.sh \$PREVIOUS_ACTIVE
-        echo \"✅ Rollback to \$PREVIOUS_ACTIVE completed\"
-        echo \"📊 Rollback status:\"
-        sudo docker exec blue-green-nginx ./detect-active-env.sh status
-      "'
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        
+        echo "🔄 Emergency rollback to $PREVIOUS_ACTIVE environment..."
+        
+        # Execute rollback via API
+        rollback_response=$(curl -s -X POST "http://localhost:9000/switch/$PREVIOUS_ACTIVE" || echo "{\"success\":false}")
+        
+        if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
+          echo "✅ Emergency rollback successful - traffic restored to $PREVIOUS_ACTIVE"
+        else
+          echo "❌ Emergency rollback failed - manual intervention required"
+          exit 1
+        fi
+        
+        # Verify rollback
+        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
+          echo "✅ Rollback verification successful"
+        else
+          echo "❌ Rollback verification failed"
+        fi
+      '

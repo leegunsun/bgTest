@@ -23,7 +23,7 @@ services:
 
 **Result**: Each service runs independently - no shared failure points.
 
-### 2. Zero-Downtime CI/CD Pipeline (`.gitlab-ci-bluegreen.yml`)
+### 2. Zero-Downtime CI/CD Pipeline (`.gitlab-ci.yml`)
 ```yaml
 Key Stages:
   deploy-inactive-dev:      # 🎯 Deploy ONLY to inactive environment
@@ -43,7 +43,7 @@ Key Stages:
 **Result**: Any service interruption is immediately detected and reported.
 
 ### 4. Enhanced Management Tools
-- **`deploy-bluegreen-v2.sh`**: Complete Blue-Green deployment management
+- **`deploy.sh`**: Complete Blue-Green deployment management
 - **Zero-downtime testing**: Automated deployment validation
 - **Health monitoring**: Comprehensive service status checking
 - **Instant rollback**: <5 second recovery capability
@@ -94,15 +94,15 @@ graph TD
 ## 📋 Files Created/Modified
 
 ### New Architecture Files
-- `docker-compose-bluegreen.yml` - Separated services architecture
+- `docker-compose.yml` - Separated services architecture
 - `app-service/` - Isolated application containers  
 - `nginx-service/` - Persistent traffic router
 - `api-service/` - Enhanced deployment control
 - `monitoring/` - Zero-downtime monitoring system
 
 ### Enhanced CI/CD
-- `.gitlab-ci-bluegreen.yml` - True zero-downtime pipeline
-- `scripts/deploy-bluegreen-v2.sh` - Complete management tool
+- `.gitlab-ci.yml` - True zero-downtime pipeline
+- `scripts/deploy.sh` - Complete management tool
 
 ### Documentation & Migration
 - `BLUE_GREEN_ANALYSIS_REPORT.md` - Technical analysis and remediation
@@ -116,29 +116,29 @@ graph TD
 ### Quick Start
 ```bash
 # Start the zero-downtime system
-docker-compose -f docker-compose-bluegreen.yml up -d
+docker-compose -f docker-compose.yml up -d
 
 # Verify system health
-./scripts/deploy-bluegreen-v2.sh status
+./scripts/deploy.sh status
 
 # Test zero-downtime capability
-./scripts/deploy-bluegreen-v2.sh test
+./scripts/deploy.sh test
 ```
 
 ### Zero-Downtime Deployment
 ```bash
 # Complete Blue-Green deployment (no downtime)
-./scripts/deploy-bluegreen-v2.sh bluegreen
+./scripts/deploy.sh bluegreen
 
 # Manual deployment steps
-./scripts/deploy-bluegreen-v2.sh deploy green    # Deploy to inactive
-./scripts/deploy-bluegreen-v2.sh switch green    # Switch traffic (<5s)
+./scripts/deploy.sh deploy green    # Deploy to inactive
+./scripts/deploy.sh switch green    # Switch traffic (<5s)
 ```
 
 ### CI/CD Integration
 ```bash
 # Update pipeline for zero-downtime deployment
-cp .gitlab-ci-bluegreen.yml .gitlab-ci.yml
+cp .gitlab-ci.yml .gitlab-ci.yml
 ```
 
 ---
@@ -183,7 +183,7 @@ Follow `MIGRATION_TO_TRUE_BLUEGREEN.md` for step-by-step migration from old syst
 ### 2. Validation (Recommended)
 ```bash
 # Validate zero-downtime capability
-./scripts/deploy-bluegreen-v2.sh test 60
+./scripts/deploy.sh test 60
 
 # Test CI/CD pipeline
 # Commit changes and watch GitLab pipeline maintain 100% availability
@@ -191,7 +191,7 @@ Follow `MIGRATION_TO_TRUE_BLUEGREEN.md` for step-by-step migration from old syst
 
 ### 3. Production Deployment (When Ready)
 - Update GitLab CI/CD variables (same variables, new pipeline)
-- Replace `.gitlab-ci.yml` with `.gitlab-ci-bluegreen.yml`
+- Replace `.gitlab-ci.yml` with `.gitlab-ci.yml`
 - Monitor first production deployment with zero-downtime validation
 
 ---
