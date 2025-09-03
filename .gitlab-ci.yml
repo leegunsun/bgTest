@@ -167,6 +167,7 @@ deploy-to-inactive-environment:
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
     - scp -r ./app-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./api-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./api-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./app-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./blue-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
@@ -208,6 +209,12 @@ deploy-to-inactive-environment:
           sudo systemctl enable docker
         fi
         
+        # Ensure Docker permissions and restart if needed
+        sudo usermod -aG docker ubuntu
+        sudo systemctl restart docker
+        sudo chmod 666 /var/run/docker.sock || true
+        newgrp docker || true
+        
         # Install Docker Compose if needed
         if ! command -v docker-compose &> /dev/null; then
           echo "📦 Installing Docker Compose..."
@@ -216,23 +223,30 @@ deploy-to-inactive-environment:
           sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
         fi
         
+        # Verify Docker is accessible
+        echo "🔍 Verifying Docker access..."
+        if ! docker ps >/dev/null 2>&1 && ! sudo docker ps >/dev/null 2>&1; then
+          echo "❌ Docker is not accessible. Please check Docker installation and permissions."
+          exit 1
+        fi
+        
         # Check if system is already running
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
           
           # TRUE ZERO-DOWNTIME DEPLOYMENT - NO CONTAINER STOP/KILL
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
-          sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
+          docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
+          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
           
           echo "⏳ Waiting for $DEPLOY_TARGET environment to be ready..."
           sleep 30
           
         else
           echo "🏗️  Initial system deployment - starting all services"
-          sudo docker-compose -f docker-compose.yml down --timeout 10 || true
-          sudo docker-compose -f docker-compose.yml build
-          sudo docker-compose -f docker-compose.yml up -d
+          docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
+          docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
+          docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
           
           echo "⏳ Waiting for all services to be ready..."
           sleep 45

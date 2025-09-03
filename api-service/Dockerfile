@@ -6,7 +6,7 @@ RUN apk add --no-cache curl bash dos2unix
 WORKDIR /app
 
 # Copy API server files
-COPY api-server/ ./
+COPY app.js ./
 
 # Windows → Linux compatibility
 RUN dos2unix ./app.js && chmod +x ./app.js
