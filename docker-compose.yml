@@ -138,8 +138,8 @@ services:
   # Zero-Downtime Monitoring Service
   monitor:
     build: 
-      context: .
-      dockerfile: monitoring/Dockerfile
+      context: ./monitoring
+      dockerfile: Dockerfile
     container_name: deployment-monitor
     hostname: deployment-monitor
     environment:

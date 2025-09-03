@@ -6,8 +6,8 @@ RUN apk add --no-cache curl bash jq dos2unix
 WORKDIR /app
 
 # Copy monitoring scripts
-COPY monitoring/monitor-deployment.sh ./monitor-deployment.sh
-COPY monitoring/zero-downtime-test.sh ./zero-downtime-test.sh
+COPY monitor-deployment.sh ./monitor-deployment.sh
+COPY zero-downtime-test.sh ./zero-downtime-test.sh
 
 # Windows → Linux compatibility
 RUN dos2unix ./monitor-deployment.sh ./zero-downtime-test.sh && \
