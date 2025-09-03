@@ -90,8 +90,8 @@ services:
       - DEPLOYMENT_ID=${GREEN_DEPLOYMENT_ID:-green-default}
       - COLOR_THEME=green                       # Visual distinction only
       - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
-    expose:
-      - "3002"  # Internal network communication only
+    ports:
+      - "3002:3002"  # Temporarily expose for debugging
     volumes:
       - deployment_state:/app/deployment         # Version tracking
     networks:
@@ -117,8 +117,8 @@ services:
       dockerfile: Dockerfile
     container_name: api-server
     hostname: api-server
-    expose:
-      - "9000"  # Internal network only
+    ports:
+      - "9000:9000"  # Temporarily expose for debugging
     volumes:
       # Shared configuration access (no Docker socket needed)
       - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro
