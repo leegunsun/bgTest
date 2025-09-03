@@ -8,9 +8,7 @@ services:
     container_name: nginx-proxy
     hostname: nginx-proxy
     ports:
-      - "80:80"        # Main proxy
-      - "8080:8080"    # Admin interface
-      - "8081:8081"    # Admin API for traffic switching
+      - "80:80"        # Main proxy (only port exposed to EC2)
     depends_on:
       - green-app
       - api-server
@@ -93,9 +91,7 @@ services:
       - COLOR_THEME=green                       # Visual distinction only
       - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
     expose:
-      - "3002"  # Internal network communication
-    ports:
-      - "3002:3002"  # Direct access for debugging
+      - "3002"  # Internal network communication only
     volumes:
       - deployment_state:/app/deployment         # Version tracking
     networks:
@@ -121,8 +117,8 @@ services:
       dockerfile: Dockerfile
     container_name: api-server
     hostname: api-server
-    ports:
-      - "9000:9000"
+    expose:
+      - "9000"  # Internal network only
     volumes:
       # Shared configuration access (no Docker socket needed)
       - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro

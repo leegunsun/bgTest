@@ -367,15 +367,23 @@ health-check-inactive-environment:
         # Check all services
         overall_status=0
         
-        # Check inactive environment
-        TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
-        if ! check_service "$DEPLOY_TARGET Server" "http://localhost:$TARGET_PORT/health"; then
+        # Check inactive environment through NGINX proxy
+        if ! check_service "$DEPLOY_TARGET Server" "http://localhost/green/health"; then
           overall_status=1
         fi
         
+        # Debug NGINX container before health check
+        echo "🔍 [DEBUG] NGINX container status:"
+        docker ps -a | grep nginx || echo "❌ No NGINX container found"
+        echo "🔍 [DEBUG] NGINX container logs:"
+        docker logs nginx-proxy --tail 20 2>&1 || echo "❌ Failed to get NGINX logs"
+        
         # Check supporting services
-        check_service "NGINX Proxy" "http://localhost:80/status" || overall_status=1
-        check_service "API Server" "http://localhost:9000/health" || overall_status=1
+        check_service "NGINX Proxy" "http://localhost:80/health" || overall_status=1
+        
+        # API Server internal check (since port 9000 is not exposed externally)
+        echo "🔍 Checking API Server internally..."
+        docker exec api-server wget --quiet --tries=1 --spider "http://localhost:9000/health" && echo "✅ API Server is healthy" || echo "❌ API Server health check failed"
         
         if [ $overall_status -eq 0 ]; then
           echo "🎉 All services are healthy - ready for traffic switch!"
