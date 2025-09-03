@@ -147,7 +147,7 @@ deploy-to-inactive-environment:
     - scp ./docker-compose.yml "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./nginx.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./admin.html "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./.env "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp ./.env "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/" || echo "No .env file found, using defaults"
     - echo "🐳 Deploying ONLY to inactive environment (maintaining zero downtime)..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
