@@ -215,6 +215,10 @@ deploy-to-inactive-environment:
         sudo chmod 666 /var/run/docker.sock || true
         newgrp docker || true
         
+        # Install debugging tools
+        sudo apt-get update -qq >/dev/null 2>&1 || true
+        sudo apt-get install -y netcat-openbsd net-tools >/dev/null 2>&1 || true
+        
         # Install Docker Compose if needed
         if ! command -v docker-compose &> /dev/null; then
           echo "📦 Installing Docker Compose..."
@@ -250,6 +254,18 @@ deploy-to-inactive-environment:
           
           echo "⏳ Waiting for all services to be ready (t2.micro needs more time)..."
           sleep 120
+          
+          # 상세 디버깅 정보 수집
+          echo "🔍 [DEBUG] Container status check:"
+          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          
+          echo "🔍 [DEBUG] Network information:"
+          docker network ls
+          docker network inspect bluegreen-network | jq ".[0].Containers" || true
+          
+          echo "🔍 [DEBUG] System resource usage:"
+          free -h || true
+          df -h || true
         fi
         
         # Verify deployment target is healthy with version validation
@@ -257,6 +273,33 @@ deploy-to-inactive-environment:
         TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
         
         for i in $(seq 1 40); do
+          echo "🔍 [DEBUG] Health check attempt $i/40 for $DEPLOY_TARGET on port $TARGET_PORT"
+          
+          # 포트 상태 확인
+          netstat -tulpn | grep ":$TARGET_PORT " || echo "❌ Port $TARGET_PORT not listening"
+          
+          # 컨테이너 로그 확인
+          if [ $i -eq 5 ] || [ $i -eq 15 ] || [ $i -eq 30 ]; then
+            echo "🔍 [DEBUG] Container logs (attempt $i):"
+            docker logs green-app --tail 10 2>&1 || true
+            docker logs api-server --tail 10 2>&1 || true
+            docker logs nginx-proxy --tail 10 2>&1 || true
+          fi
+          
+          # HTTP 응답 상세 확인
+          HTTP_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}\n" "http://localhost:$TARGET_PORT/health" 2>&1 || echo "CURL_ERROR")
+          echo "🔍 [DEBUG] HTTP Response: $HTTP_RESPONSE"
+          
+          # 단순 포트 연결 테스트
+          if nc -z localhost $TARGET_PORT 2>/dev/null; then
+            echo "✅ Port $TARGET_PORT is open and accepting connections"
+          else
+            echo "❌ Port $TARGET_PORT is not accepting connections"
+          fi
+          
+          # 컨테이너 프로세스 확인
+          docker exec green-app ps aux 2>/dev/null || echo "❌ Cannot access green-app container"
+          
           if curl -f "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
             echo "✅ $DEPLOY_TARGET environment is healthy!"
             
@@ -271,6 +314,12 @@ deploy-to-inactive-environment:
           
           if [ $i -eq 40 ]; then
             echo "❌ $DEPLOY_TARGET environment failed to become healthy"
+            echo "🔍 [DEBUG] Final diagnostic information:"
+            docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo "📋 Container logs:"
+            docker logs green-app --tail 20 2>&1 || echo "No green-app logs"
+            docker logs api-server --tail 20 2>&1 || echo "No api-server logs"
+            docker logs nginx-proxy --tail 20 2>&1 || echo "No nginx-proxy logs"
             exit 1
           fi
           
