@@ -1,49 +1,69 @@
-version: '3.8'
-
-# True Blue-Green Deployment with Separated Services
-# This architecture enables zero-downtime deployment by isolating services
+# True Zero-Downtime Blue-Green Deployment
+# Enhanced networking with shared volumes and reliable container communication
 
 services:
-  # NGINX Proxy Service - Traffic Router
+  # NGINX Proxy Service - Traffic Router (Persistent)
   nginx-proxy:
-    build: ./nginx-service
+    build: 
+      context: .
+      dockerfile: nginx-service/Dockerfile
     container_name: nginx-proxy
+    hostname: nginx-proxy
     ports:
       - "80:80"        # Main proxy
       - "8080:8080"    # Admin interface
+      - "8081:8081"    # Admin API for traffic switching
     depends_on:
       blue-app:
         condition: service_healthy
       green-app:
         condition: service_healthy
+      api-server:
+        condition: service_healthy
     volumes:
-      - nginx_config:/etc/nginx/dynamic
+      # Shared configuration for zero-downtime switching
+      - ./conf.d/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
+      - ./conf.d/active.env:/etc/nginx/conf.d/active.env:rw
+      - ./conf.d/routing.conf:/etc/nginx/conf.d/routing.conf:ro
       - nginx_logs:/var/log/nginx
     networks:
-      - bluegreen-network
+      bluegreen-network:
+        aliases:
+          - nginx-proxy
+          - nginx
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/status"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/status"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
+    environment:
+      - NGINX_RESOLVER=127.0.0.11  # Docker's internal DNS
 
   # Blue Environment Application
   blue-app:
-    build: ./app-service
+    build: 
+      context: .
+      dockerfile: app-service/Dockerfile
     container_name: blue-app
+    hostname: blue-app
     environment:
       - ENV_NAME=blue
       - SERVER_PORT=3001
       - VERSION=1.0.0
+    expose:
+      - "3001"  # Internal network communication
     ports:
-      - "3001:3001"    # Blue server (direct access)
+      - "3001:3001"  # Direct access for debugging
     networks:
-      - bluegreen-network
+      bluegreen-network:
+        aliases:
+          - blue-app
+          - blue-server
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -51,69 +71,102 @@ services:
 
   # Green Environment Application  
   green-app:
-    build: ./app-service
+    build: 
+      context: .
+      dockerfile: app-service/Dockerfile
     container_name: green-app
+    hostname: green-app
     environment:
       - ENV_NAME=green
       - SERVER_PORT=3002
       - VERSION=2.0.0
+    expose:
+      - "3002"  # Internal network communication
     ports:
-      - "3002:3002"    # Green server (direct access)
+      - "3002:3002"  # Direct access for debugging
     networks:
-      - bluegreen-network
+      bluegreen-network:
+        aliases:
+          - green-app
+          - green-server
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  # API Service for Deployment Control
+  # API Service for Deployment Control (HTTP API based - No Docker Socket)
   api-server:
-    build: ./api-service
+    build: 
+      context: .
+      dockerfile: api-service/Dockerfile
     container_name: api-server
+    hostname: api-server
     ports:
-      - "9000:9000"    # API server
-    depends_on:
-      - nginx-proxy
-      - blue-app
-      - green-app
+      - "9000:9000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker communication
+      # Shared configuration access (no Docker socket needed)
+      - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro
     networks:
-      - bluegreen-network
+      bluegreen-network:
+        aliases:
+          - api-server
+          - api
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
+    environment:
+      - NO_DOCKER_SOCKET=true
 
   # Zero-Downtime Monitoring Service
   monitor:
-    build: ./monitoring
+    build: 
+      context: .
+      dockerfile: monitoring/Dockerfile
     container_name: deployment-monitor
+    hostname: deployment-monitor
     environment:
       - MONITOR_INTERVAL=5
       - ALERT_THRESHOLD=3
+      - NGINX_URL=http://nginx-proxy:80
+      - BLUE_URL=http://blue-app:3001
+      - GREEN_URL=http://green-app:3002
+      - API_URL=http://api-server:9000
     depends_on:
       - nginx-proxy
+      - blue-app
+      - green-app
+      - api-server
     networks:
-      - bluegreen-network
+      bluegreen-network:
+        aliases:
+          - monitor
+          - deployment-monitor
     restart: unless-stopped
     volumes:
       - monitoring_data:/app/data
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "monitor"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 networks:
   bluegreen-network:
     driver: bridge
     name: bluegreen-network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/16  # Consistent networking
 
 volumes:
-  nginx_config:
-    driver: local
   nginx_logs:
     driver: local
   monitoring_data:

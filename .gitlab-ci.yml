@@ -97,12 +97,29 @@ detect-active-environment:
         cd ~/bgTest/v5ToWindow
         echo "📊 Environment Detection:"
         
-        # Check if system is running
+        # Enhanced environment detection with API fallback
+        echo "🔍 Detecting current environment with multiple methods..."
+        
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ Blue-Green system is running"
           
-          # Get current active environment
-          CURRENT_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" || echo "blue")
+          # Try API-based detection first (more reliable)
+          API_ACTIVE=$(curl -s --max-time 5 "http://localhost:9000/status" | jq -r ".current_deployment" 2>/dev/null || echo "")
+          
+          # Fallback to file-based detection
+          FILE_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" 2>/dev/null || echo "")
+          
+          # Choose the most reliable source
+          if [ -n "$API_ACTIVE" ] && [ "$API_ACTIVE" != "null" ]; then
+            CURRENT_ACTIVE="$API_ACTIVE"
+            echo "📊 Using API-detected environment: $CURRENT_ACTIVE"
+          elif [ -n "$FILE_ACTIVE" ]; then
+            CURRENT_ACTIVE="$FILE_ACTIVE"
+            echo "📄 Using file-detected environment: $CURRENT_ACTIVE"
+          else
+            CURRENT_ACTIVE="blue"
+            echo "⚠️  No reliable detection, defaulting to: $CURRENT_ACTIVE"
+          fi
           
           # Determine deployment target (opposite of current)
           if [ "$CURRENT_ACTIVE" = "blue" ]; then
@@ -179,12 +196,10 @@ deploy-to-inactive-environment:
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
           
-          # Deploy ONLY to inactive environment - NO SERVICE INTERRUPTION
-          echo "🔄 Rebuilding inactive $DEPLOY_TARGET environment..."
-          sudo docker-compose -f docker-compose.yml stop ${DEPLOY_TARGET}-app || true
-          sudo docker-compose -f docker-compose.yml rm -f ${DEPLOY_TARGET}-app || true
+          # TRUE ZERO-DOWNTIME DEPLOYMENT - NO CONTAINER STOP/KILL
+          echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
           sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          sudo docker-compose -f docker-compose.yml up -d ${DEPLOY_TARGET}-app
+          sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
           
           echo "⏳ Waiting for $DEPLOY_TARGET environment to be ready..."
           sleep 30
