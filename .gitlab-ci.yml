@@ -132,9 +132,14 @@ detect-active-environment:
             echo "⚠️  No reliable detection, defaulting to: $CURRENT_ACTIVE"
           fi
           
-          # t2.micro optimization: Force green-only deployment
-          DEPLOY_TARGET="green"
-          echo "🎯 t2.micro mode: Forcing green-only deployment"
+          # True Blue-Green deployment: Deploy to inactive environment
+          if [ "$CURRENT_ACTIVE" = "blue" ]; then
+            DEPLOY_TARGET="green"
+            echo "🔵→🟢 Current: blue, Deploying to: green"
+          else
+            DEPLOY_TARGET="blue"
+            echo "🟢→🔵 Current: green, Deploying to: blue"
+          fi
         else
           echo "⚠️  System not running, defaulting to green deployment"
           CURRENT_ACTIVE="blue"
@@ -179,15 +184,21 @@ deploy-to-inactive-environment:
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
         
-        # t2.micro optimization: Force green-only deployment
-        DEPLOY_TARGET="green"
+        # True Blue-Green deployment: Deploy to inactive environment
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
         DEPLOY_VERSION="'${DEPLOYMENT_VERSION}'"
-        echo "🎯 Deploying version $DEPLOY_VERSION to $DEPLOY_TARGET environment (t2.micro single-env mode)"
+        echo "🎯 Deploying version $DEPLOY_VERSION to $DEPLOY_TARGET environment (True Blue-Green mode)"
         
-        # Set green version (t2.micro single-env mode)
-        export GREEN_VERSION="$DEPLOY_VERSION"
-        echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
-        echo "🟢 t2.micro mode: Setting GREEN_VERSION=$DEPLOY_VERSION"
+        # Set version for target environment (True Blue-Green mode)
+        if [ "$DEPLOY_TARGET" = "blue" ]; then
+          export BLUE_VERSION="$DEPLOY_VERSION"
+          echo "BLUE_VERSION=$DEPLOY_VERSION" >> .env
+          echo "🔵 True Blue-Green: Setting BLUE_VERSION=$DEPLOY_VERSION"
+        else
+          export GREEN_VERSION="$DEPLOY_VERSION"
+          echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
+          echo "🟢 True Blue-Green: Setting GREEN_VERSION=$DEPLOY_VERSION"
+        fi
         
         # Ensure deployment metadata directory exists
         mkdir -p deployment_state
@@ -274,7 +285,7 @@ deploy-to-inactive-environment:
           # 컨테이너 로그 확인
           if [ $i -eq 5 ] || [ $i -eq 15 ] || [ $i -eq 30 ]; then
             echo "🔍 [DEBUG] Container logs (attempt $i):"
-            docker logs green-app --tail 10 2>&1 || true
+            docker logs ${DEPLOY_TARGET}-app --tail 10 2>&1 || true
             docker logs api-server --tail 10 2>&1 || true
             docker logs nginx-proxy --tail 10 2>&1 || true
           fi
@@ -291,7 +302,7 @@ deploy-to-inactive-environment:
           fi
           
           # 컨테이너 프로세스 확인
-          docker exec green-app ps aux 2>/dev/null || echo "❌ Cannot access green-app container"
+          docker exec ${DEPLOY_TARGET}-app ps aux 2>/dev/null || echo "❌ Cannot access ${DEPLOY_TARGET}-app container"
           
           if curl -f "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
             echo "✅ $DEPLOY_TARGET environment is healthy!"
@@ -310,7 +321,7 @@ deploy-to-inactive-environment:
             echo "🔍 [DEBUG] Final diagnostic information:"
             docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
             echo "📋 Container logs:"
-            docker logs green-app --tail 20 2>&1 || echo "No green-app logs"
+            docker logs ${DEPLOY_TARGET}-app --tail 20 2>&1 || echo "No ${DEPLOY_TARGET}-app logs"
             docker logs api-server --tail 20 2>&1 || echo "No api-server logs"
             docker logs nginx-proxy --tail 20 2>&1 || echo "No nginx-proxy logs"
             exit 1
@@ -335,8 +346,8 @@ health-check-inactive-environment:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET="green"  # t2.micro: Force green-only mode
-        echo "🎯 Health checking $DEPLOY_TARGET environment (t2.micro single-env mode)..."
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        echo "🎯 Health checking $DEPLOY_TARGET environment (True Blue-Green mode)..."
         
         # Comprehensive health check
         check_service() {
@@ -361,7 +372,7 @@ health-check-inactive-environment:
         overall_status=0
         
         # Check inactive environment through NGINX proxy
-        if ! check_service "$DEPLOY_TARGET Server" "http://localhost/green/health"; then
+        if ! check_service "$DEPLOY_TARGET Server" "http://localhost/$DEPLOY_TARGET/health"; then
           overall_status=1
         fi
         
@@ -428,9 +439,9 @@ switch-traffic-to-inactive:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET="green"  # t2.micro: Force green-only mode
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
         
-        echo "🚦 Switching traffic to $DEPLOY_TARGET environment (t2.micro single-env mode)..."
+        echo "🚦 Switching traffic to $DEPLOY_TARGET environment (True Blue-Green mode)..."
         
         # Execute traffic switch via API
         switch_response=$(curl -s -X POST "http://localhost:9000/switch/$DEPLOY_TARGET" || echo "{\"success\":false}")

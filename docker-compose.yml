@@ -28,9 +28,9 @@ services:
           - nginx-proxy
           - nginx
     restart: unless-stopped
-    mem_limit: 80m                               # Very strict memory limit
-    memswap_limit: 80m                           # No swap usage
-    cpus: '0.15'                                 # Minimal CPU usage
+    mem_limit: 50m                               # Ultra-optimized for Blue-Green
+    memswap_limit: 50m                           # No swap usage
+    cpus: '0.1'                                  # Minimal CPU usage
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/status"]
     #   interval: 30s                              # Longer interval for t2.micro
@@ -40,41 +40,39 @@ services:
     environment:
       - NGINX_RESOLVER=127.0.0.11  # Docker's internal DNS
 
-  # Blue Environment Application (DISABLED for t2.micro - single environment mode)
-  # blue-app:
-  #   build: 
-  #     context: .
-  #     dockerfile: app-service/Dockerfile
-  #   container_name: blue-app
-  #   hostname: blue-app
-  #   environment:
-  #     - ENV_NAME=blue
-  #     - SERVER_PORT=3001
-  #     - VERSION=${BLUE_VERSION:-1.0.0}          # Dynamic version
-  #     - DEPLOYMENT_ID=${BLUE_DEPLOYMENT_ID:-blue-default}
-  #     - COLOR_THEME=blue                        # Visual distinction only
-  #     - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
-  #   expose:
-  #     - "3001"  # Internal network communication
-  #   ports:
-  #     - "3001:3001"  # Direct access for debugging
-  #   volumes:
-  #     - deployment_state:/app/deployment         # Version tracking
-  #   networks:
-  #     bluegreen-network:
-  #       aliases:
-  #         - blue-app
-  #         - blue-server
-  #   restart: unless-stopped
-  #   mem_limit: 150m                              # Strict memory limit
-  #   memswap_limit: 150m                          # No swap usage
-  #   cpus: '0.3'                                  # Limit CPU usage
-  #   healthcheck:
-  #     test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
-  #     interval: 30s                              # Longer interval for t2.micro
-  #     timeout: 10s                               # More timeout
-  #     retries: 3                                 # Fewer retries
-  #     start_period: 60s                          # Longer startup time
+  # Blue Environment Application (t2.micro optimized Blue-Green)
+  blue-app:
+    build: 
+      context: .
+      dockerfile: app-service/Dockerfile
+    container_name: blue-app
+    hostname: blue-app
+    environment:
+      - ENV_NAME=blue
+      - SERVER_PORT=3001
+      - VERSION=${BLUE_VERSION:-1.0.0}          # Dynamic version
+      - DEPLOYMENT_ID=${BLUE_DEPLOYMENT_ID:-blue-default}
+      - COLOR_THEME=blue                        # Visual distinction only
+      - NODE_OPTIONS=--max-old-space-size=100   # Ultra-optimized memory
+    expose:
+      - "3001"  # Internal network communication only
+    volumes:
+      - deployment_state:/app/deployment         # Version tracking
+    networks:
+      bluegreen-network:
+        aliases:
+          - blue-app
+          - blue-server
+    restart: unless-stopped
+    mem_limit: 120m                              # Optimized for t2.micro Blue-Green
+    memswap_limit: 120m                          # No swap usage
+    cpus: '0.25'                                 # Optimized CPU usage
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout
+      retries: 3                                 # Fewer retries
+      start_period: 60s                          # Longer startup time
 
   # Green Environment Application (t2.micro optimized)
   green-app:
@@ -89,9 +87,9 @@ services:
       - VERSION=${GREEN_VERSION:-1.0.0}          # Dynamic version
       - DEPLOYMENT_ID=${GREEN_DEPLOYMENT_ID:-green-default}
       - COLOR_THEME=green                       # Visual distinction only
-      - NODE_OPTIONS=--max-old-space-size=128   # Limit Node.js memory
-    ports:
-      - "3002:3002"  # Temporarily expose for debugging
+      - NODE_OPTIONS=--max-old-space-size=100   # Ultra-optimized memory
+    expose:
+      - "3002"  # Internal network communication only
     volumes:
       - deployment_state:/app/deployment         # Version tracking
     networks:
@@ -100,9 +98,9 @@ services:
           - green-app
           - green-server
     restart: unless-stopped
-    mem_limit: 150m                              # Strict memory limit
-    memswap_limit: 150m                          # No swap usage
-    cpus: '0.3'                                  # Limit CPU usage
+    mem_limit: 120m                              # Optimized for t2.micro Blue-Green
+    memswap_limit: 120m                          # No swap usage
+    cpus: '0.25'                                 # Optimized CPU usage
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
     #   interval: 30s                              # Longer interval for t2.micro
@@ -117,8 +115,8 @@ services:
       dockerfile: Dockerfile
     container_name: api-server
     hostname: api-server
-    ports:
-      - "9000:9000"  # Temporarily expose for debugging
+    expose:
+      - "9000"  # Internal network communication only
     volumes:
       # Shared configuration access (no Docker socket needed)
       - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro
@@ -129,12 +127,12 @@ services:
           - api-server
           - api
     restart: unless-stopped
-    mem_limit: 100m                              # Strict memory limit
-    memswap_limit: 100m                          # No swap usage
-    cpus: '0.2'                                  # Limit CPU usage
+    mem_limit: 80m                               # Ultra-optimized for Blue-Green
+    memswap_limit: 80m                           # No swap usage
+    cpus: '0.15'                                 # Optimized CPU usage
     environment:
       - NO_DOCKER_SOCKET=true
-      - NODE_OPTIONS=--max-old-space-size=80     # Very limited memory for API
+      - NODE_OPTIONS=--max-old-space-size=60     # Ultra-optimized memory for API
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9000/health"]
     #   interval: 30s                              # Longer interval for t2.micro
