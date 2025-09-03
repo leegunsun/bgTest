@@ -1,6 +1,6 @@
 ---
 # True Blue-Green Deployment CI/CD Pipeline
-# Implements zero-downtime deployment with separated container architecture.
+# Implements zero-downtime deployment with separated container architecture
 
 stages:
   - build-dev
