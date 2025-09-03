@@ -302,7 +302,7 @@ zero-downtime-validation:
         echo "✅ Service is stable and ready for traffic switch"
       '
 
-# 7. Switch Traffic (Manual Approval Required)
+# 7. Switch Traffic (Manual Approval Required).
 switch-traffic-to-inactive:
   stage: switch-traffic-dev
   image: alpine:latest
