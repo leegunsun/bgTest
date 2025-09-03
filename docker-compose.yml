@@ -11,11 +11,9 @@ services:
       - "80:80"        # Main proxy
       - "8080:8080"    # Admin interface
       - "8081:8081"    # Admin API for traffic switching
-    # depends_on:
-    #   green-app:
-    #     condition: service_healthy
-    #   api-server:
-    #     condition: service_healthy
+    depends_on:
+      - green-app
+      - api-server
     volumes:
       # NGINX main configuration
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
