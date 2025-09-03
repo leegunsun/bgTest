@@ -103,37 +103,63 @@ switch_traffic() {
     fi
 }
 
-# Deploy to specific environment
+# Deploy to specific environment with version
 deploy_to_environment() {
     local env="$1"
+    local version="${2:-latest}"
     
     if [[ "$env" != "blue" && "$env" != "green" ]]; then
         error "Invalid environment: $env. Must be 'blue' or 'green'"
         return 1
     fi
     
-    log "🚀 Deploying to $env environment..."
+    log "🚀 Deploying version $version to $env environment..."
+    
+    # Set version environment variables for deployment
+    local version_var="${env^^}_VERSION"
+    export "$version_var=$version"
+    
+    log "🔧 Setting deployment configuration: $version_var=$version"
     
     # Stop and rebuild the target environment
     log "🛑 Stopping $env environment..."
     docker-compose -f "$COMPOSE_FILE" stop "${env}-app" 2>/dev/null || true
     docker-compose -f "$COMPOSE_FILE" rm -f "${env}-app" 2>/dev/null || true
     
-    log "🏗️  Rebuilding $env environment..."
+    log "🏗️  Rebuilding $env environment with version $version..."
     docker-compose -f "$COMPOSE_FILE" build "${env}-app"
     
     log "🚀 Starting $env environment..."
     docker-compose -f "$COMPOSE_FILE" up -d "${env}-app"
     
-    # Wait for health check
+    # Wait for health check with dynamic port detection
     log "⏳ Waiting for $env environment to be healthy..."
     local port
     [[ "$env" == "green" ]] && port=3002 || port=3001
     
+    # Wait for deployment metadata to be created
+    sleep 3
+    
     for attempt in {1..20}; do
         if check_service_health "$env server" "http://localhost:$port/health" 3; then
             log "✅ $env environment is healthy"
-            return 0
+            
+            # Validate version deployment
+            local deployed_version
+            deployed_version=$(curl -fsS "http://localhost:$port/version" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "unknown")
+            
+            if [[ "$deployed_version" == "$version" ]]; then
+                log "✅ Version validation successful: $deployed_version"
+                
+                # Show deployment metadata
+                local deployment_info
+                deployment_info=$(curl -fsS "http://localhost:$port/deployment" 2>/dev/null | jq -r '.deployment_id' 2>/dev/null || echo "unknown")
+                log "📦 Deployment ID: $deployment_info"
+                
+                return 0
+            else
+                warn "⚠️  Version mismatch: expected $version, got $deployed_version"
+            fi
         fi
         
         if [[ $attempt -eq 20 ]]; then
@@ -245,6 +271,120 @@ stop_system() {
     log "✅ System stopped"
 }
 
+# Version management functions
+show_version_info() {
+    info "📋 Version Information"
+    echo "======================"
+    
+    if is_system_running; then
+        local current_env
+        current_env=$(get_active_environment)
+        info "🎯 Active environment: $current_env"
+        
+        echo ""
+        info "Current Deployed Versions:"
+        echo "-------------------------"
+        
+        # Get version info from both environments
+        for env in blue green; do
+            local port
+            [[ "$env" == "green" ]] && port=3002 || port=3001
+            
+            if check_service_health "$env server" "http://localhost:$port/health" 1; then
+                local version deployment_id build_time
+                version=$(curl -fsS "http://localhost:$port/version" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "unknown")
+                deployment_id=$(curl -fsS "http://localhost:$port/version" 2>/dev/null | jq -r '.deployment_id' 2>/dev/null || echo "unknown")
+                build_time=$(curl -fsS "http://localhost:$port/version" 2>/dev/null | jq -r '.build_time' 2>/dev/null || echo "unknown")
+                
+                local status_icon
+                [[ "$env" == "$current_env" ]] && status_icon="🟢 ACTIVE" || status_icon="🔵 STANDBY"
+                
+                echo -e "  ${env^^}: ${GREEN}$version${NC} ($deployment_id) $status_icon"
+                [[ "$build_time" != "unknown" ]] && echo "       Built: $build_time"
+            else
+                echo -e "  ${env^^}: ${RED}UNHEALTHY${NC}"
+            fi
+        done
+        
+        echo ""
+    else
+        warn "⚠️  System is not running"
+    fi
+}
+
+list_deployed_versions() {
+    info "📚 Deployment Version History"
+    echo "============================="
+    
+    # Check for deployment state directory
+    local deploy_state_dir="$PROJECT_DIR/deployment_state"
+    if [[ -d "$deploy_state_dir" ]]; then
+        local history_file="$deploy_state_dir/deployment_history.json"
+        if [[ -f "$history_file" ]]; then
+            echo "Recent deployments:"
+            cat "$history_file" 2>/dev/null | jq -r '.[] | "  \(.timestamp) - \(.version) to \(.environment) (ID: \(.deployment_id))"' 2>/dev/null || \
+                echo "  No deployment history available"
+        else
+            echo "  No deployment history file found"
+        fi
+    else
+        echo "  No deployment state directory found"
+        echo "  Deploy a version first to start tracking history"
+    fi
+    
+    echo ""
+    show_version_info
+}
+
+rollback_to_version() {
+    local target_version="$1"
+    
+    log "🔄 Rolling back to version $target_version..."
+    
+    if ! is_system_running; then
+        error "System is not running. Please start the system first."
+        return 1
+    fi
+    
+    local current_env
+    current_env=$(get_active_environment)
+    
+    # Find which environment has the target version
+    local target_env=""
+    for env in blue green; do
+        local port
+        [[ "$env" == "green" ]] && port=3002 || port=3001
+        
+        if check_service_health "$env server" "http://localhost:$port/health" 1; then
+            local version
+            version=$(curl -fsS "http://localhost:$port/version" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "unknown")
+            
+            if [[ "$version" == "$target_version" ]]; then
+                target_env="$env"
+                break
+            fi
+        fi
+    done
+    
+    if [[ -n "$target_env" ]]; then
+        if [[ "$target_env" == "$current_env" ]]; then
+            log "✅ Version $target_version is already active in $current_env environment"
+        else
+            log "🔄 Rolling back by switching to $target_env environment (version $target_version)"
+            switch_traffic "$target_env"
+        fi
+    else
+        warn "⚠️  Version $target_version not found in any environment"
+        log "🚀 Deploying version $target_version to inactive environment..."
+        
+        local inactive_env
+        [[ "$current_env" == "blue" ]] && inactive_env="green" || inactive_env="blue"
+        
+        deploy_to_environment "$inactive_env" "$target_version" && \
+        switch_traffic "$inactive_env"
+    fi
+}
+
 # Zero-downtime deployment test
 test_zero_downtime() {
     local duration="${1:-30}"
@@ -348,9 +488,9 @@ main() {
             ;;
         "deploy")
             if [[ -n "${2:-}" ]]; then
-                deploy_to_environment "$2"
+                deploy_to_environment "$2" "${3:-latest}"
             else
-                error "Usage: $0 deploy {blue|green}"
+                error "Usage: $0 deploy {blue|green} [version]"
                 exit 1
             fi
             ;;
@@ -358,7 +498,8 @@ main() {
             test_zero_downtime "${2:-30}"
             ;;
         "bluegreen")
-            # Full blue-green deployment flow
+            # Full blue-green deployment flow with version support
+            local version="${2:-latest}"
             local current_env
             current_env=$(get_active_environment)
             
@@ -372,33 +513,65 @@ main() {
             [[ "$current_env" == "blue" ]] && target_env="green" || target_env="blue"
             
             log "🚀 Executing full Blue-Green deployment flow"
+            log "   Version: $version"
             log "   Current: $current_env → Target: $target_env"
             
-            deploy_to_environment "$target_env" && \
+            deploy_to_environment "$target_env" "$version" && \
             switch_traffic "$target_env" && \
             log "🎉 Blue-Green deployment completed successfully!"
             ;;
+        "version")
+            # Version management commands
+            case "${2:-show}" in
+                "show")
+                    show_version_info
+                    ;;
+                "list")
+                    list_deployed_versions
+                    ;;
+                "rollback")
+                    if [[ -n "${3:-}" ]]; then
+                        rollback_to_version "$3"
+                    else
+                        error "Usage: $0 version rollback {version}"
+                        exit 1
+                    fi
+                    ;;
+                *)
+                    error "Usage: $0 version {show|list|rollback} [version]"
+                    exit 1
+                    ;;
+            esac
+            ;;
         "help"|*)
-            echo "True Blue-Green Deployment Management v2.0"
+            echo "True Blue-Green Deployment Management v2.1"
             echo "Usage: $0 {command} [options]"
             echo ""
-            echo "Commands:"
-            echo "  start           - Start the entire Blue-Green system"
-            echo "  stop            - Stop the entire system"
-            echo "  status          - Show system and service status"
-            echo "  switch {color}  - Switch traffic to blue or green"
-            echo "  deploy {color}  - Deploy to specific environment"
-            echo "  bluegreen       - Execute full Blue-Green deployment"
-            echo "  test [duration] - Run zero-downtime test (default: 30s)"
-            echo "  help            - Show this help message"
+            echo "System Commands:"
+            echo "  start                      - Start the entire Blue-Green system"
+            echo "  stop                       - Stop the entire system"
+            echo "  status                     - Show system and service status"
+            echo "  test [duration]            - Run zero-downtime test (default: 30s)"
+            echo ""
+            echo "Deployment Commands:"
+            echo "  deploy {color} [version]   - Deploy specific version to environment"
+            echo "  switch {color}             - Switch traffic to blue or green"
+            echo "  bluegreen [version]        - Execute full Blue-Green deployment"
+            echo ""
+            echo "Version Management:"
+            echo "  version show               - Show current deployed versions"
+            echo "  version list               - List deployment history"
+            echo "  version rollback {version} - Rollback to specific version"
             echo ""
             echo "Examples:"
-            echo "  $0 start                  # Start the system"
-            echo "  $0 status                 # Check system status"
-            echo "  $0 deploy green           # Deploy to green environment"
-            echo "  $0 switch green           # Switch traffic to green"
-            echo "  $0 bluegreen             # Full deployment flow"
-            echo "  $0 test 60               # 60-second zero-downtime test"
+            echo "  $0 start                     # Start the system"
+            echo "  $0 status                    # Check system status"
+            echo "  $0 deploy green 2.1.0        # Deploy version 2.1.0 to green"
+            echo "  $0 switch green              # Switch traffic to green"
+            echo "  $0 bluegreen 2.1.0           # Full deployment with version 2.1.0"
+            echo "  $0 version show              # Show current versions"
+            echo "  $0 version rollback 2.0.0    # Rollback to version 2.0.0"
+            echo "  $0 test 60                   # 60-second zero-downtime test"
             ;;
     esac
 }

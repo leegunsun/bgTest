@@ -5,16 +5,22 @@ RUN apk add --no-cache curl dos2unix
 
 WORKDIR /app
 
-# Copy application files
+# Copy unified application server
+COPY app-server/ ./app-server/
+
+# Copy legacy servers for compatibility (optional)
 COPY blue-server/ ./blue-server/
 COPY green-server/ ./green-server/
 
 # Windows → Linux compatibility: line ending conversion and execution permissions
-RUN dos2unix ./blue-server/app.js ./green-server/app.js
+RUN dos2unix ./app-server/app.js ./blue-server/app.js ./green-server/app.js
 
-# Environment-specific application launcher
+# Unified application launcher
 COPY app-service/start-app.sh ./start-app.sh
 RUN dos2unix ./start-app.sh && chmod +x ./start-app.sh
+
+# Create deployment metadata directory
+RUN mkdir -p /app/deployment
 
 # Expose ports for both blue and green
 EXPOSE 3001 3002

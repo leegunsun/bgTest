@@ -19,6 +19,10 @@ variables:
   NODE_OPTIONS: "--max_old_space_size=2048"
   DOCKER_DRIVER: overlay2
   COMPOSE_FILE: "docker-compose.yml"
+  # Dynamic versioning support
+  BLUE_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  GREEN_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  DEPLOYMENT_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
 
 # Reusable rules
 .rules_dev_and_main: &rules_dev_main
@@ -51,10 +55,15 @@ build-dev:
   image: node:18-alpine
   <<: *rules_dev_main
   script:
-    - echo "🏗️  Building Blue-Green separated architecture..."
+    - echo "🏗️  Building Blue-Green unified architecture with version ${DEPLOYMENT_VERSION}..."
     - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
-    - echo "📦 Preparing artifacts for separated container deployment..."
-    - ls -la app-service/ nginx-service/ api-service/ monitoring/ || echo "Service directories ready"
+    - echo "VERSION=${DEPLOYMENT_VERSION}" >> ./.env
+    - echo "📦 Preparing artifacts for unified container deployment..."
+    - echo "🔧 Version configuration:"
+    - echo "   BLUE_VERSION=${BLUE_VERSION}"
+    - echo "   GREEN_VERSION=${GREEN_VERSION}"
+    - echo "   DEPLOYMENT_VERSION=${DEPLOYMENT_VERSION}"
+    - ls -la app-service/ nginx-service/ api-service/ monitoring/ app-server/ || echo "Service directories ready"
   artifacts:
     expire_in: 3 days
     paths:
@@ -63,6 +72,7 @@ build-dev:
       - ./api-service/
       - ./monitoring/
       - ./scripts/
+      - ./app-server/
       - ./blue-server/
       - ./green-server/
       - ./nginx.conf
@@ -78,11 +88,12 @@ test-dev:
   <<: *rules_dev_main
   needs: ["build-dev"]
   script:
-    - echo "🧪 Testing separated services architecture..."
+    - echo "🧪 Testing unified services architecture..."
+    - node -c app-server/app.js
     - node -c blue-server/app.js
     - node -c green-server/app.js
     - node -c api-service/app-updated.js || node -c api-server/app.js
-    - echo "✅ All service syntax checks passed"
+    - echo "✅ All service syntax checks passed - unified + legacy compatibility"
 
 # 3. Environment Detection
 detect-active-environment:
@@ -152,12 +163,13 @@ deploy-to-inactive-environment:
     url: "http://$DEPLOY_SERVER_DEV"
   script:
     - echo "🚀 TRUE BLUE-GREEN DEPLOYMENT - Deploy to inactive environment only"
-    - echo "📁 Transferring separated service architecture..."
+    - echo "📁 Transferring unified service architecture..."
     - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
     - scp -r ./app-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./nginx-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./api-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - scp -r ./app-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./blue-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./green-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./conf.d/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
@@ -170,9 +182,22 @@ deploy-to-inactive-environment:
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
         
-        # Get deployment target
+        # Get deployment target and set version
         DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        echo "🎯 Deploying to inactive environment: $DEPLOY_TARGET"
+        DEPLOY_VERSION="'${DEPLOYMENT_VERSION}'"
+        echo "🎯 Deploying version $DEPLOY_VERSION to inactive environment: $DEPLOY_TARGET"
+        
+        # Set version environment variables
+        if [ "$DEPLOY_TARGET" = "blue" ]; then
+          export BLUE_VERSION="$DEPLOY_VERSION"
+          echo "BLUE_VERSION=$DEPLOY_VERSION" >> .env
+        else
+          export GREEN_VERSION="$DEPLOY_VERSION"
+          echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
+        fi
+        
+        # Ensure deployment metadata directory exists
+        mkdir -p deployment_state
         
         # Install Docker if needed
         if ! command -v docker &> /dev/null; then
@@ -214,13 +239,20 @@ deploy-to-inactive-environment:
           sleep 45
         fi
         
-        # Verify deployment target is healthy
+        # Verify deployment target is healthy with version validation
         echo "🏥 Health checking deployed $DEPLOY_TARGET environment..."
         TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
         
         for i in $(seq 1 20); do
           if curl -f "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
             echo "✅ $DEPLOY_TARGET environment is healthy!"
+            
+            # Validate deployment version
+            DEPLOYED_VERSION=$(curl -s "http://localhost:$TARGET_PORT/version" | jq -r ".version" 2>/dev/null || echo "unknown")
+            if [ "$DEPLOYED_VERSION" != "unknown" ]; then
+              echo "📋 Deployed version: $DEPLOYED_VERSION"
+              echo "🆔 Deployment ID: $(curl -s "http://localhost:$TARGET_PORT/version" | jq -r ".deployment_id" 2>/dev/null || echo "unknown")"
+            fi
             break
           fi
           
@@ -233,7 +265,7 @@ deploy-to-inactive-environment:
           sleep 5
         done
         
-        echo "🎉 Inactive environment deployment completed successfully!"
+        echo "🎉 Inactive environment deployment completed successfully with version tracking!"
       '
 
 # 5. Health Check Inactive Environment

@@ -1,12 +1,10 @@
-# True Zero-Downtime Blue-Green Deployment
-# Enhanced networking with shared volumes and reliable container communication
+# True Blue-Green Deployment - Identical Environments
+# Dynamic version deployment to inactive environments with zero-downtime switching
 
 services:
   # NGINX Proxy Service - Traffic Router (Persistent)
   nginx-proxy:
-    build: 
-      context: .
-      dockerfile: nginx-service/Dockerfile
+    image: nginx:alpine
     container_name: nginx-proxy
     hostname: nginx-proxy
     ports:
@@ -21,10 +19,14 @@ services:
       api-server:
         condition: service_healthy
     volumes:
+      # NGINX main configuration
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
       # Shared configuration for zero-downtime switching
       - ./conf.d/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
       - ./conf.d/active.env:/etc/nginx/conf.d/active.env:rw
       - ./conf.d/routing.conf:/etc/nginx/conf.d/routing.conf:ro
+      - ./admin.html:/var/www/html/index.html:ro
+      - deployment_state:/etc/deployment  # Version tracking
       - nginx_logs:/var/log/nginx
     networks:
       bluegreen-network:
@@ -41,7 +43,7 @@ services:
     environment:
       - NGINX_RESOLVER=127.0.0.11  # Docker's internal DNS
 
-  # Blue Environment Application
+  # Blue Environment Application (Identical to Green)
   blue-app:
     build: 
       context: .
@@ -51,11 +53,15 @@ services:
     environment:
       - ENV_NAME=blue
       - SERVER_PORT=3001
-      - VERSION=1.0.0
+      - VERSION=${BLUE_VERSION:-1.0.0}          # Dynamic version
+      - DEPLOYMENT_ID=${BLUE_DEPLOYMENT_ID:-blue-default}
+      - COLOR_THEME=blue                        # Visual distinction only
     expose:
       - "3001"  # Internal network communication
     ports:
       - "3001:3001"  # Direct access for debugging
+    volumes:
+      - deployment_state:/app/deployment         # Version tracking
     networks:
       bluegreen-network:
         aliases:
@@ -69,7 +75,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # Green Environment Application  
+  # Green Environment Application (Identical to Blue)
   green-app:
     build: 
       context: .
@@ -79,11 +85,15 @@ services:
     environment:
       - ENV_NAME=green
       - SERVER_PORT=3002
-      - VERSION=2.0.0
+      - VERSION=${GREEN_VERSION:-1.0.0}          # Dynamic version
+      - DEPLOYMENT_ID=${GREEN_DEPLOYMENT_ID:-green-default}
+      - COLOR_THEME=green                       # Visual distinction only
     expose:
       - "3002"  # Internal network communication
     ports:
       - "3002:3002"  # Direct access for debugging
+    volumes:
+      - deployment_state:/app/deployment         # Version tracking
     networks:
       bluegreen-network:
         aliases:
@@ -109,6 +119,7 @@ services:
     volumes:
       # Shared configuration access (no Docker socket needed)
       - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro
+      - deployment_state:/etc/deployment:rw     # Version management
     networks:
       bluegreen-network:
         aliases:
@@ -151,6 +162,7 @@ services:
     restart: unless-stopped
     volumes:
       - monitoring_data:/app/data
+      - deployment_state:/app/deployment:ro     # Access to version info
     healthcheck:
       test: ["CMD", "pgrep", "-f", "monitor"]
       interval: 30s
@@ -171,3 +183,5 @@ volumes:
     driver: local
   monitoring_data:
     driver: local
+  deployment_state:
+    driver: local                              # Version and deployment tracking
