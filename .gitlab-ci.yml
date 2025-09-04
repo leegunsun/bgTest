@@ -657,8 +657,9 @@ emergency-rollback:
         
         echo "🔄 Emergency rollback to $PREVIOUS_ACTIVE environment..."
         
-        # Execute rollback via API
-        rollback_response=$(curl -s -X POST "http://localhost:9000/switch/$PREVIOUS_ACTIVE" || echo "{\"success\":false}")
+        # Execute rollback via API - using Docker internal network
+        rollback_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+          curl -s -X POST "http://api-server:9000/switch/$PREVIOUS_ACTIVE" 2>/dev/null || echo "{\"success\":false}")
         
         if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
           echo "✅ Emergency rollback successful - traffic restored to $PREVIOUS_ACTIVE"
