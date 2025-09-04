@@ -32,12 +32,12 @@ services:
     mem_limit: 50m                               # Ultra-optimized for Blue-Green
     memswap_limit: 50m                           # No swap usage
     cpus: '0.1'                                  # Minimal CPU usage
-    # healthcheck:
-    #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/status"]
-    #   interval: 30s                              # Longer interval for t2.micro
-    #   timeout: 10s                               # More timeout
-    #   retries: 3                                 # Fewer retries
-    #   start_period: 90s                          # Much longer startup time
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --timeout=5 http://localhost:80/health || curl -f --max-time 5 http://localhost:80/health || exit 1"]
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout for network requests
+      retries: 3                                 # Conservative retries for t2.micro
+      start_period: 90s                          # Much longer startup time for t2.micro
     environment:
       - NGINX_RESOLVER=127.0.0.11  # Docker's internal DNS
 
@@ -69,11 +69,11 @@ services:
     memswap_limit: 120m                          # No swap usage
     cpus: '0.25'                                 # Optimized CPU usage
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --timeout=5 http://localhost:3001/health || curl -f --max-time 5 http://localhost:3001/health || exit 1"]
       interval: 30s                              # Longer interval for t2.micro
-      timeout: 10s                               # More timeout
-      retries: 3                                 # Fewer retries
-      start_period: 60s                          # Longer startup time
+      timeout: 10s                               # More timeout for reliable health checks
+      retries: 3                                 # Conservative retries for t2.micro
+      start_period: 60s                          # Longer startup time for Node.js app
 
   # Green Environment Application (t2.micro optimized)
   green-app:
@@ -102,12 +102,12 @@ services:
     mem_limit: 120m                              # Optimized for t2.micro Blue-Green
     memswap_limit: 120m                          # No swap usage
     cpus: '0.25'                                 # Optimized CPU usage
-    # healthcheck:
-    #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
-    #   interval: 30s                              # Longer interval for t2.micro
-    #   timeout: 10s                               # More timeout
-    #   retries: 3                                 # Fewer retries
-    #   start_period: 60s                          # Longer startup time
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --timeout=5 http://localhost:3002/health || curl -f --max-time 5 http://localhost:3002/health || exit 1"]
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout for reliable health checks
+      retries: 3                                 # Conservative retries for t2.micro
+      start_period: 60s                          # Longer startup time for Node.js app
 
   # API Service for Deployment Control (t2.micro optimized)
   api-server:
@@ -134,12 +134,12 @@ services:
     environment:
       - NO_DOCKER_SOCKET=true
       - NODE_OPTIONS=--max-old-space-size=60     # Ultra-optimized memory for API
-    # healthcheck:
-    #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9000/health"]
-    #   interval: 30s                              # Longer interval for t2.micro
-    #   timeout: 10s                               # More timeout
-    #   retries: 2                                 # Fewer retries
-    #   start_period: 45s                          # Longer startup time
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --timeout=5 http://localhost:9000/health || curl -f --max-time 5 http://localhost:9000/health || exit 1"]
+      interval: 30s                              # Longer interval for t2.micro
+      timeout: 10s                               # More timeout for API response
+      retries: 2                                 # Fewer retries for lightweight API
+      start_period: 45s                          # Longer startup time for Node.js API
 
   # Zero-Downtime Monitoring Service (DISABLED for t2.micro)
   # monitor:
