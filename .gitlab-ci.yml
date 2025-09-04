@@ -115,8 +115,10 @@ detect-active-environment:
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ Blue-Green system is running"
           
-          # Try API-based detection first (more reliable)
-          API_ACTIVE=$(curl -s --max-time 5 "http://localhost:9000/status" | jq -r ".current_deployment" 2>/dev/null || echo "")
+          # Try API-based detection first (more reliable) - using Docker internal network
+          API_RESPONSE=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+            curl -s --max-time 5 "http://api-server:9000/status" 2>/dev/null || echo "")
+          API_ACTIVE=$(echo "$API_RESPONSE" | jq -r ".current_deployment" 2>/dev/null || echo "")
           
           # Fallback to file-based detection
           FILE_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" 2>/dev/null || echo "")
@@ -548,8 +550,9 @@ switch-traffic-to-inactive:
         
         echo "🚦 Switching traffic to $DEPLOY_TARGET environment (True Blue-Green mode)..."
         
-        # Execute traffic switch via API
-        switch_response=$(curl -s -X POST "http://localhost:9000/switch/$DEPLOY_TARGET" || echo "{\"success\":false}")
+        # Execute traffic switch via API - using Docker internal network
+        switch_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+          curl -s -X POST "http://api-server:9000/switch/$DEPLOY_TARGET" 2>/dev/null || echo "{\"success\":false}")
         
         if echo "$switch_response" | jq -e ".success" >/dev/null 2>&1; then
           echo "✅ Traffic successfully switched to $DEPLOY_TARGET"
