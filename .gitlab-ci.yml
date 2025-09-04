@@ -397,7 +397,7 @@ health-check-inactive-environment:
         fi
       '
 
-# 6. Zero-Downtime Test (Critical Validation)
+# 6. Zero-Downtime Test (Critical Validation).
 zero-downtime-validation:
   stage: zero-downtime-test-dev
   image: alpine:latest
