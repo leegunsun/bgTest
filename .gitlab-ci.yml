@@ -613,7 +613,7 @@ switch-traffic-to-inactive:
         fi
       '
 
-# 8. Deployment Verification
+# 8. Deployment Verification.
 verify-deployment:
   stage: verify-deployment-dev
   image: alpine:latest
