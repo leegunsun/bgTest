@@ -16,6 +16,7 @@ stages:
 # Common variables
 variables:
   GIT_DEPTH: "0"
+  CI_DEBUG_TRACE: "true"  # 상세 디버그 로그 활성화
   NODE_OPTIONS: "--max_old_space_size=2048"
   DOCKER_DRIVER: overlay2
   COMPOSE_FILE: "docker-compose.yml"
@@ -63,12 +64,11 @@ build-dev:
     - echo "   BLUE_VERSION=${BLUE_VERSION}"
     - echo "   GREEN_VERSION=${GREEN_VERSION}"
     - echo "   DEPLOYMENT_VERSION=${DEPLOYMENT_VERSION}"
-    - ls -la app-service/ nginx-service/ api-service/ monitoring/ app-server/ || echo "Service directories ready"
+    - ls -la app-service/ api-service/ monitoring/ app-server/ || echo "Service directories ready"
   artifacts:
     expire_in: 3 days
     paths:
       - ./app-service/
-      - ./nginx-service/
       - ./api-service/
       - ./monitoring/
       - ./scripts/
@@ -102,6 +102,7 @@ detect-active-environment:
   <<: [*ssh_setup, *rules_dev_main]
   needs: ["build-dev", "test-dev"]
   script:
+    - set -x  # 모든 명령어 출력
     - echo "🔍 Detecting current active environment..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
