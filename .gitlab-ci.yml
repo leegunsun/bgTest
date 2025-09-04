@@ -2,6 +2,10 @@
 # True Blue-Green Deployment CI/CD Pipeline
 # Implements zero-downtime deployment with separated container architecture
 
+default:
+  tags:
+    - mac-mini
+
 stages:
   - build-dev
   - test-dev
