@@ -16,7 +16,7 @@ stages:
 # Common variables
 variables:
   GIT_DEPTH: "0"
-  CI_DEBUG_TRACE: "true"  # 상세 디버그 로그 활성화
+#  CI_DEBUG_TRACE: "true"  # 상세 디버그 로그 활성화
   NODE_OPTIONS: "--max_old_space_size=2048"
   DOCKER_DRIVER: overlay2
   COMPOSE_FILE: "docker-compose.yml"
@@ -102,7 +102,7 @@ detect-active-environment:
   <<: [*ssh_setup, *rules_dev_main]
   needs: ["build-dev", "test-dev"]
   script:
-    - set -x  # 모든 명령어 출력
+#    - set -x  # 모든 명령어 출력
     - echo "🔍 Detecting current active environment..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
