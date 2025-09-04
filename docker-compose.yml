@@ -10,6 +10,7 @@ services:
     ports:
       - "80:80"        # Main proxy (only port exposed to EC2)
     depends_on:
+      - blue-app
       - green-app
       - api-server
     volumes:
