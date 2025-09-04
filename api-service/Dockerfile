@@ -1,14 +1,14 @@
 FROM node:18-alpine
 
-# Install required tools
-RUN apk add --no-cache curl bash dos2unix
+# Install required tools including Docker CLI for container management
+RUN apk add --no-cache curl bash dos2unix docker-cli
 
 WORKDIR /app
 
 # Copy API server files
-COPY app.js ./
+COPY app-fixed.js ./app.js
 
-# Windows → Linux compatibility
+# Windows → Linux compatibility and make executable
 RUN dos2unix ./app.js && chmod +x ./app.js
 
 # Health check

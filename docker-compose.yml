@@ -119,9 +119,10 @@ services:
     expose:
       - "9000"  # Internal network communication only
     volumes:
-      # Shared configuration access (no Docker socket needed)
-      - ./conf.d/active.env:/etc/nginx/conf.d/active.env:ro
+      # Shared configuration access and Docker socket for container management
+      - ./conf.d/active.env:/etc/nginx/conf.d/active.env:rw
       - deployment_state:/etc/deployment:rw     # Version management
+      - /var/run/docker.sock:/var/run/docker.sock # Docker socket for nginx-proxy management
     networks:
       bluegreen-network:
         aliases:
@@ -132,7 +133,6 @@ services:
     memswap_limit: 80m                           # No swap usage
     cpus: '0.15'                                 # Optimized CPU usage
     environment:
-      - NO_DOCKER_SOCKET=true
       - NODE_OPTIONS=--max-old-space-size=60     # Ultra-optimized memory for API
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --timeout=5 http://localhost:9000/health || curl -f --max-time 5 http://localhost:9000/health || exit 1"]
