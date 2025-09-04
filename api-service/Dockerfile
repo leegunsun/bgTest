@@ -6,7 +6,7 @@ RUN apk add --no-cache curl bash dos2unix docker-cli
 WORKDIR /app
 
 # Copy API server files
-COPY app-fixed.js ./app.js
+COPY app-fixed-v2.js ./app.js
 
 # Windows → Linux compatibility and make executable
 RUN dos2unix ./app.js && chmod +x ./app.js
