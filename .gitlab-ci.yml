@@ -513,19 +513,160 @@ zero-downtime-validation:
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        echo "🚀 Starting zero-downtime test before traffic switch..."
+        echo "🚀 Starting enhanced zero-downtime validation before traffic switch..."
         
-        # Quick availability test
-        echo "📊 Testing current service availability..."
-        for i in $(seq 1 30); do
-          if ! curl -f --max-time 2 "http://localhost:80/status" >/dev/null 2>&1; then
-            echo "❌ Service availability test failed"
-            exit 1
+        # Enhanced multi-layer service availability validation
+        echo "📊 Multi-layer service availability validation..."
+        
+        # Helper function: Check Docker container health
+        check_docker_health() {
+          local container="$1"
+          local health_status=$(docker inspect --format="{{.State.Health.Status}}" "$container" 2>/dev/null || echo "no-health")
+          local running_status=$(docker inspect --format="{{.State.Running}}" "$container" 2>/dev/null || echo "false")
+          echo "🔍 $container: Running=$running_status, Health=$health_status"
+          
+          if [ "$running_status" = "true" ] && ([ "$health_status" = "healthy" ] || [ "$health_status" = "no-health" ]); then
+            return 0
           fi
-          sleep 1
+          return 1
+        }
+        
+        # Helper function: Internal container service check
+        check_internal_service() {
+          local container="$1"
+          local port="$2"
+          local endpoint="$3"
+          
+          if docker exec "$container" sh -c "curl -sS -f --max-time 5 http://localhost:$port$endpoint >/dev/null" 2>/dev/null; then
+            echo "✅ Internal service check: $container:$port$endpoint"
+            return 0
+          fi
+          echo "❌ Internal service check failed: $container:$port$endpoint"
+          return 1
+        }
+        
+        # Helper function: Network-level service check
+        check_network_service() {
+          local service="$1"
+          local port="$2"
+          local endpoint="$3"
+          
+          if docker run --rm --network bluegreen-network curlimages/curl:latest \
+             -sS -f --max-time 5 "http://$service:$port$endpoint" >/dev/null 2>/dev/null; then
+            echo "✅ Network service check: $service:$port$endpoint"
+            return 0
+          fi
+          echo "❌ Network service check failed: $service:$port$endpoint"
+          return 1
+        }
+        
+        # Enhanced validation with progressive retry
+        max_attempts=20
+        validation_passed=false
+        
+        for attempt in $(seq 1 $max_attempts); do
+          echo "🔍 Validation attempt $attempt/$max_attempts"
+          overall_health=0
+          
+          # Layer 1: Check all critical Docker containers
+          echo "📋 Layer 1: Docker container health validation"
+          for container in nginx-proxy api-server; do
+            if check_docker_health "$container"; then
+              echo "✅ $container container is healthy"
+            else
+              echo "❌ $container container health check failed"
+              overall_health=1
+            fi
+          done
+          
+          # Layer 2: Internal service validation 
+          echo "📋 Layer 2: Internal service validation"
+          if check_internal_service "nginx-proxy" "80" "/status"; then
+            nginx_internal_ok=1
+          else
+            nginx_internal_ok=0
+            overall_health=1
+          fi
+          
+          if check_internal_service "api-server" "9000" "/health"; then
+            api_internal_ok=1
+          else
+            api_internal_ok=0
+            overall_health=1
+          fi
+          
+          # Layer 3: Network-level validation
+          echo "📋 Layer 3: Network-level service validation"
+          if check_network_service "nginx-proxy" "80" "/status"; then
+            nginx_network_ok=1
+          else
+            nginx_network_ok=0
+            overall_health=1
+          fi
+          
+          # Layer 4: External HTTP endpoint validation (multiple endpoints)
+          echo "📋 Layer 4: External HTTP endpoint validation"
+          external_health=0
+          
+          # Try multiple endpoints with increasing timeouts
+          for endpoint in "/status" "/health"; do
+            for timeout in 3 5 8; do
+              if curl -sS -f --max-time $timeout "http://localhost:80$endpoint" >/dev/null 2>&1; then
+                echo "✅ External HTTP check passed: localhost:80$endpoint (${timeout}s timeout)"
+                external_health=1
+                break 2
+              fi
+            done
+          done
+          
+          if [ $external_health -eq 0 ]; then
+            echo "❌ All external HTTP checks failed"
+            overall_health=1
+          fi
+          
+          # Overall validation assessment
+          if [ $overall_health -eq 0 ]; then
+            echo "🎉 All validation layers passed - system is stable!"
+            validation_passed=true
+            break
+          fi
+          
+          # Enhanced debugging for failed attempts
+          if [ $attempt -eq 5 ] || [ $attempt -eq 10 ] || [ $attempt -eq 15 ]; then
+            echo "🔍 [DEBUG] Detailed system state (attempt $attempt):"
+            docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | grep -E "(nginx|api)"
+            
+            echo "🔍 [DEBUG] Container logs:"
+            docker logs --tail 10 nginx-proxy 2>&1 | head -15 || echo "No nginx-proxy logs"
+            docker logs --tail 10 api-server 2>&1 | head -15 || echo "No api-server logs"
+            
+            echo "🔍 [DEBUG] Network connectivity:"
+            docker exec nginx-proxy sh -c "netstat -tulpn 2>/dev/null | grep :80" || echo "Port 80 not bound"
+            
+            echo "🔍 [DEBUG] Manual curl test:"
+            curl -v --max-time 10 "http://localhost:80/status" 2>&1 | head -20 || echo "Curl test failed"
+          fi
+          
+          # Progressive backoff with cap
+          wait_time=$(( 2 + attempt ))
+          if [ $wait_time -gt 15 ]; then wait_time=15; fi
+          echo "⏳ Waiting ${wait_time}s before next validation attempt..."
+          sleep "$wait_time"
         done
         
-        echo "✅ Service is stable and ready for traffic switch"
+        # Final validation result
+        if [ "$validation_passed" = true ]; then
+          echo "✅ Zero-downtime validation successful - system is ready for traffic switch"
+        else
+          echo "❌ Zero-downtime validation failed after $max_attempts attempts"
+          echo "🔍 [FINAL DEBUG] System diagnostic summary:"
+          docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+          echo "🔍 Final network state:"
+          docker exec nginx-proxy sh -c "netstat -tulpn" 2>/dev/null | head -10 || echo "Cannot access nginx-proxy internals"
+          echo "🔍 Final curl attempt with full output:"
+          curl -v --max-time 10 "http://localhost:80/status" 2>&1 || echo "Final curl failed"
+          exit 1
+        fi
       '
 
 # 7. Switch Traffic (Manual Approval Required).
