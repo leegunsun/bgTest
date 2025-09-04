@@ -247,11 +247,39 @@ deploy-to-inactive-environment:
           
           # TRUE ZERO-DOWNTIME DEPLOYMENT - NO CONTAINER STOP/KILL
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
+          
+          # Rebuild API server with latest fixes (network access issue resolution)
+          echo "🔧 Rebuilding API server with network access fixes..."
+          docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
+          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server
+          
+          # Rebuild target application environment
+          echo "🎯 Rebuilding $DEPLOY_TARGET application environment..."
           docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
           docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
           
-          echo "⏳ Waiting for $DEPLOY_TARGET environment to be ready..."
-          sleep 30
+          echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
+          sleep 45  # Extended wait time for API server + target environment startup
+          
+          # Verify API server is accessible with new implementation
+          echo "🔍 Verifying API server accessibility..."
+          for attempt in $(seq 1 10); do
+            if docker run --rm --network bluegreen-network curlimages/curl:latest curl -s --max-time 3 "http://api-server:9000/health" >/dev/null; then
+              echo "✅ API server is responsive (attempt $attempt/10)"
+              break
+            else
+              echo "⏳ API server not ready yet (attempt $attempt/10)..."
+              sleep 5
+            fi
+            if [ $attempt -eq 10 ]; then
+              echo "❌ API server failed to become ready after 10 attempts"
+              echo "🔍 Container status:"
+              docker ps --filter "name=api-server"
+              echo "🔍 API server logs:"
+              docker logs api-server --tail 50 || true
+              exit 1
+            fi
+          done
           
         else
           echo "🏗️  Initial system deployment - starting all services"
@@ -550,9 +578,22 @@ switch-traffic-to-inactive:
         
         echo "🚦 Switching traffic to $DEPLOY_TARGET environment (True Blue-Green mode)..."
         
+        # Debug: Check API server status first
+        echo "🔍 Debugging API server status..."
+        echo "📊 Current container status:"
+        docker ps --filter "name=api-server" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        
+        echo "🔍 Testing API server connectivity..."
+        api_health=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+          curl -s --max-time 5 "http://api-server:9000/health" 2>/dev/null || echo "API_UNREACHABLE")
+        echo "📊 API health response: $api_health"
+        
         # Execute traffic switch via API - using Docker internal network
+        echo "🔄 Executing switch command..."
         switch_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-          curl -s -X POST "http://api-server:9000/switch/$DEPLOY_TARGET" 2>/dev/null || echo "{\"success\":false}")
+          curl -s -X POST "http://api-server:9000/switch/$DEPLOY_TARGET" 2>/dev/null || echo "{\"success\":false,\"error\":\"network_call_failed\"}")
+        
+        echo "📊 Raw switch response: $switch_response"
         
         if echo "$switch_response" | jq -e ".success" >/dev/null 2>&1; then
           echo "✅ Traffic successfully switched to $DEPLOY_TARGET"
