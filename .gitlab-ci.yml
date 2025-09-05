@@ -96,7 +96,7 @@ test-dev:
     - node -c app-server/app.js
     - node -c blue-server/app.js
     - node -c green-server/app.js
-    - node -c node -c api-server/app.js
+    - node -c api-server/app.js
     - echo "✅ All service syntax checks passed - unified + legacy compatibility"
 
 # 3. Environment Detection
