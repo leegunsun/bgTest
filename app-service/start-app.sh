@@ -9,6 +9,7 @@ COLOR_THEME="${COLOR_THEME:-${ENV_NAME}}"
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-${ENV_NAME}-$(date +%s)}"
 
 echo "🚀 Starting True Blue-Green Application Server"
+echo "   🎯 Single Codebase, Dynamic Environment Configuration"
 echo "   Environment: ${ENV_NAME}"
 echo "   Port: ${SERVER_PORT}"
 echo "   Version: ${VERSION}"

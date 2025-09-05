@@ -77,8 +77,6 @@ build-dev:
       - ./monitoring/
       - ./scripts/
       - ./app-server/
-      - ./blue-server/
-      - ./green-server/
       - ./nginx.conf
       - ./conf.d/
       - ./admin.html
@@ -92,12 +90,10 @@ test-dev:
   <<: *rules_dev_main
   needs: ["build-dev"]
   script:
-    - echo "🧪 Testing unified services architecture..."
+    - echo "🧪 Testing unified services architecture (True Blue-Green Pattern)..."
     - node -c app-server/app.js
-    - node -c blue-server/app.js
-    - node -c green-server/app.js
     - node -c api-server/app.js
-    - echo "✅ All service syntax checks passed - unified + legacy compatibility"
+    - echo "✅ All service syntax checks passed - Single codebase architecture"
 
 # 3. Environment Detection
 detect-active-environment:
@@ -179,8 +175,6 @@ deploy-to-inactive-environment:
     - scp -r ./api-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./app-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./blue-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./green-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./conf.d/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./docker-compose.yml "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./nginx.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
