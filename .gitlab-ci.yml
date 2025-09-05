@@ -175,7 +175,9 @@ deploy-to-inactive-environment:
     - scp -r ./api-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp -r ./app-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./conf.d/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
+    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow/conf.d"
+    - scp ./conf.d/upstreams.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/conf.d/"
+    - scp ./conf.d/routing.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/conf.d/"
     - scp ./docker-compose.yml "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./nginx.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
     - scp ./admin.html "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
@@ -281,6 +283,16 @@ deploy-to-inactive-environment:
           
         else
           echo "🏗️  Initial system deployment - starting all services"
+          
+          # Initialize active.env for first deployment (True Blue-Green setup)
+          if [ ! -f "conf.d/active.env" ]; then
+            echo "🔧 Initializing active.env for first deployment..."
+            echo "set \$active \"green\";" > conf.d/active.env
+            echo "✅ Created initial active.env with green environment"
+          else
+            echo "ℹ️  active.env already exists, preserving current configuration"
+          fi
+          
           docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
           docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
           docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
