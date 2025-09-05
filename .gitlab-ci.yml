@@ -689,7 +689,7 @@ cleanup-previous-environment:
         echo "   Cleanup completed"
       '
 
-# 10. Emergency Rollback (Manual)
+# 10. Emergency Rollback (Manual).
 emergency-rollback:
   stage: cleanup-dev
   image: alpine:latest
