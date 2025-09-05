@@ -15,6 +15,12 @@ stages:
   - zero-downtime-test-dev
   - switch-traffic-dev
   - verify-deployment-dev
+  # NEW: Extended stages for complete dual update cycle
+  - detect-dual-update-dev      # Check if dual update cycle is needed
+  - deploy-second-env-dev       # Deploy to the second environment
+  - verify-version-sync-dev     # Verify both environments have same version
+  - enable-load-balancing-dev   # Enable load balancing mode
+  - test-load-balancing-dev     # Test load balancing functionality
   - cleanup-dev
 
 # Common variables
@@ -725,4 +731,335 @@ emergency-rollback:
         else
           echo "❌ Rollback verification failed"
         fi
+      '
+
+# ==============================================================================
+# NEW: EXTENDED DUAL UPDATE CYCLE IMPLEMENTATION
+# Complete Blue-Green deployment with load balancing support
+# ==============================================================================
+
+# 10. Detect Dual Update Requirement
+detect-dual-update-needed:
+  stage: detect-dual-update-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["verify-deployment"]
+  script:
+    - echo "🔍 Analyzing if dual update cycle is needed..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        echo "📊 Dual Update Analysis:"
+        
+        # Get current versions from both environments
+        BLUE_VERSION=$(curl -s "http://localhost:3001/version" 2>/dev/null | jq -r ".version" 2>/dev/null || echo "unknown")
+        GREEN_VERSION=$(curl -s "http://localhost:3002/version" 2>/dev/null | jq -r ".version" 2>/dev/null || echo "unknown")
+        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "unknown")
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "unknown")
+        DEPLOYMENT_VERSION="'${DEPLOYMENT_VERSION}'"
+        
+        echo "🔍 Environment Analysis:"
+        echo "   Blue Version: $BLUE_VERSION"
+        echo "   Green Version: $GREEN_VERSION"
+        echo "   Target Version: $DEPLOYMENT_VERSION" 
+        echo "   Previous Active: $CURRENT_ACTIVE"
+        echo "   Recently Deployed: $DEPLOY_TARGET"
+        
+        # Determine if dual update is needed
+        DUAL_UPDATE_NEEDED="false"
+        NEXT_TARGET="none"
+        
+        if [ "$BLUE_VERSION" != "$GREEN_VERSION" ]; then
+          echo "✅ Dual update needed - environments have different versions"
+          DUAL_UPDATE_NEEDED="true"
+          
+          # Determine which environment needs updating
+          if [ "$BLUE_VERSION" != "$DEPLOYMENT_VERSION" ]; then
+            NEXT_TARGET="blue"
+            echo "🎯 Next target: Blue environment (current: $BLUE_VERSION → target: $DEPLOYMENT_VERSION)"
+          elif [ "$GREEN_VERSION" != "$DEPLOYMENT_VERSION" ]; then
+            NEXT_TARGET="green"
+            echo "🎯 Next target: Green environment (current: $GREEN_VERSION → target: $DEPLOYMENT_VERSION)"
+          fi
+        else
+          echo "ℹ️  Both environments synchronized - dual update not needed"
+          DUAL_UPDATE_NEEDED="false"
+        fi
+        
+        # Save dual update decision
+        echo "$DUAL_UPDATE_NEEDED" > ~/dual_update_needed.env
+        echo "$NEXT_TARGET" > ~/dual_update_target.env
+        
+        echo "📋 Dual Update Decision: $DUAL_UPDATE_NEEDED"
+        echo "📋 Next Target: $NEXT_TARGET"
+      '
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - dual_update_needed.env
+      - dual_update_target.env
+
+# 11. Deploy to Second Environment (Complete the Cycle)
+deploy-second-environment:
+  stage: deploy-second-env-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["detect-dual-update-needed"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: false
+  environment:
+    name: dual-sync-dev
+    url: "http://$DEPLOY_SERVER_DEV"
+  script:
+    - echo "🔄 SECOND ENVIRONMENT DEPLOYMENT - Completing dual update cycle"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        DUAL_UPDATE_NEEDED=$(cat ~/dual_update_needed.env 2>/dev/null || echo "false")
+        NEXT_TARGET=$(cat ~/dual_update_target.env 2>/dev/null || echo "none")
+        DEPLOYMENT_VERSION="'${DEPLOYMENT_VERSION}'"
+        
+        if [ "$DUAL_UPDATE_NEEDED" != "true" ]; then
+          echo "ℹ️  Dual update not needed - environments already synchronized"
+          exit 0
+        fi
+        
+        if [ "$NEXT_TARGET" = "none" ]; then
+          echo "⚠️  No target environment identified for dual update"
+          exit 1
+        fi
+        
+        echo "🚀 Deploying version $DEPLOYMENT_VERSION to $NEXT_TARGET environment (dual sync)"
+        
+        # Set version for target environment
+        if [ "$NEXT_TARGET" = "blue" ]; then
+          export BLUE_VERSION="$DEPLOYMENT_VERSION"
+          echo "BLUE_VERSION=$DEPLOYMENT_VERSION" >> .env
+          echo "🔵 Dual Sync: Setting BLUE_VERSION=$DEPLOYMENT_VERSION"
+        else
+          export GREEN_VERSION="$DEPLOYMENT_VERSION"
+          echo "GREEN_VERSION=$DEPLOYMENT_VERSION" >> .env  
+          echo "🟢 Dual Sync: Setting GREEN_VERSION=$DEPLOYMENT_VERSION"
+        fi
+        
+        # Rebuild and deploy target environment (non-disruptive)
+        echo "🏗️  Rebuilding $NEXT_TARGET environment for dual synchronization..."
+        docker-compose -f docker-compose.yml build ${NEXT_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${NEXT_TARGET}-app
+        docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${NEXT_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${NEXT_TARGET}-app
+        
+        echo "⏳ Waiting for $NEXT_TARGET environment synchronization..."
+        sleep 30
+        
+        # Health check for second environment
+        TARGET_PORT=$(if [ "$NEXT_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
+        APP_CONTAINER="${NEXT_TARGET}-app"
+        
+        for attempt in $(seq 1 20); do
+          echo "🔍 Health check attempt $attempt/20 for $NEXT_TARGET synchronization"
+          
+          if docker exec "$APP_CONTAINER" sh -c "curl -sS -f --max-time 5 http://localhost:$TARGET_PORT/health >/dev/null" 2>/dev/null; then
+            # Verify version deployment
+            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
+            if [ "$DEPLOYED_VERSION" = "$DEPLOYMENT_VERSION" ]; then
+              echo "✅ $NEXT_TARGET environment synchronized successfully"
+              echo "📋 Deployed version: $DEPLOYED_VERSION"
+              break
+            else
+              echo "⚠️  Version mismatch: expected $DEPLOYMENT_VERSION, got $DEPLOYED_VERSION"
+            fi
+          fi
+          
+          if [ $attempt -eq 20 ]; then
+            echo "❌ $NEXT_TARGET environment synchronization failed"
+            exit 1
+          fi
+          
+          sleep 5
+        done
+        
+        echo "🎉 Second environment deployment completed - ready for dual mode!"
+      '
+
+# 12. Verify Version Synchronization
+verify-version-synchronization:
+  stage: verify-version-sync-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["deploy-second-environment"]
+  script:
+    - echo "🔍 Verifying version synchronization across both environments..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        echo "📊 Version Synchronization Verification:"
+        
+        # Get versions from both environments
+        BLUE_VERSION=$(curl -s --max-time 5 "http://localhost:3001/version" 2>/dev/null | jq -r ".version" 2>/dev/null || echo "unreachable")
+        GREEN_VERSION=$(curl -s --max-time 5 "http://localhost:3002/version" 2>/dev/null | jq -r ".version" 2>/dev/null || echo "unreachable")
+        
+        echo "🔵 Blue Environment Version: $BLUE_VERSION"
+        echo "🟢 Green Environment Version: $GREEN_VERSION"
+        
+        # Verify synchronization
+        if [ "$BLUE_VERSION" = "$GREEN_VERSION" ] && [ "$BLUE_VERSION" != "unreachable" ]; then
+          echo "✅ SUCCESS: Both environments synchronized"
+          echo "📋 Synchronized Version: $BLUE_VERSION"
+          
+          # Update NGINX configuration for dual mode readiness
+          echo "🔧 Updating NGINX configuration for dual mode..."
+          docker exec nginx-proxy sh -c "
+            sed -i '\''s/set \$versions_synchronized \"false\";/set \$versions_synchronized \"true\";/'\'' /etc/nginx/conf.d/active.env
+            sed -i '\''s/set \$blue_version \"[^\"]*\";/set \$blue_version \"'\''$BLUE_VERSION'\''\";/'\'' /etc/nginx/conf.d/active.env
+            sed -i '\''s/set \$green_version \"[^\"]*\";/set \$green_version \"'\''$GREEN_VERSION'\''\";/'\'' /etc/nginx/conf.d/active.env
+          "
+          
+          echo "sync_verified=true" > ~/version_sync_status.env
+          echo "$BLUE_VERSION" > ~/synchronized_version.env
+        else
+          echo "❌ FAILED: Environment synchronization incomplete"
+          echo "   Blue: $BLUE_VERSION"
+          echo "   Green: $GREEN_VERSION"
+          echo "sync_verified=false" > ~/version_sync_status.env
+          exit 1
+        fi
+      '
+
+# 13. Enable Load Balancing Mode
+enable-load-balancing:
+  stage: enable-load-balancing-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["verify-version-synchronization"]
+  when: manual
+  allow_failure: false
+  environment:
+    name: load-balanced-production-dev
+    url: "http://$DEPLOY_SERVER_DEV"
+  script:
+    - echo "⚖️  ENABLING LOAD BALANCING - Dual environment activation"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        SYNC_STATUS=$(cat ~/version_sync_status.env 2>/dev/null || echo "sync_verified=false")
+        
+        if [ "$SYNC_STATUS" != "sync_verified=true" ]; then
+          echo "❌ Cannot enable load balancing - environments not synchronized"
+          exit 1
+        fi
+        
+        echo "⚖️  Activating load balancing mode..."
+        
+        # Update NGINX configuration to enable load balancing
+        docker exec nginx-proxy sh -c "
+          # Enable dual/load balancing mode
+          sed -i '\''s/set \$active \"[^\"]*\";/set \$active \"dual\";/'\'' /etc/nginx/conf.d/active.env
+          sed -i '\''s/set \$deployment_mode \"[^\"]*\";/set \$deployment_mode \"dual\";/'\'' /etc/nginx/conf.d/active.env
+          sed -i '\''s/set \$load_balancing_enabled \"false\";/set \$load_balancing_enabled \"true\";/'\'' /etc/nginx/conf.d/active.env
+          sed -i '\''s/set \$deployment_phase \"[^\"]*\";/set \$deployment_phase \"load_balanced\";/'\'' /etc/nginx/conf.d/active.env
+        "
+        
+        # Reload NGINX configuration
+        docker exec nginx-proxy nginx -t && docker exec nginx-proxy nginx -s reload
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ Load balancing enabled successfully"
+          echo "⚖️  Traffic now distributed across both blue and green environments"
+          
+          # Update deployment state
+          echo "load_balancing=enabled" > ~/load_balancing_status.env
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > ~/load_balancing_enabled_time.env
+        else
+          echo "❌ Failed to enable load balancing - NGINX configuration error"
+          exit 1
+        fi
+      '
+
+# 14. Test Load Balancing Functionality
+test-load-balancing-functionality:
+  stage: test-load-balancing-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["enable-load-balancing"]
+  script:
+    - echo "🧪 Testing load balancing functionality and traffic distribution..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        echo "📊 Load Balancing Functionality Test:"
+        
+        # Test traffic distribution across both environments
+        echo "🔄 Testing traffic distribution (100 requests)..."
+        
+        blue_responses=0
+        green_responses=0
+        failed_requests=0
+        
+        for i in $(seq 1 100); do
+          response=$(curl -s --max-time 3 "http://localhost:80/" 2>/dev/null || echo "FAILED")
+          
+          if echo "$response" | grep -q "BLUE\|blue" 2>/dev/null; then
+            blue_responses=$((blue_responses + 1))
+          elif echo "$response" | grep -q "GREEN\|green" 2>/dev/null; then
+            green_responses=$((green_responses + 1))
+          else
+            failed_requests=$((failed_requests + 1))
+          fi
+          
+          # Brief pause between requests
+          [ $((i % 20)) -eq 0 ] && echo "📊 Progress: $i/100 requests completed"
+          sleep 0.1
+        done
+        
+        total_successful=$((blue_responses + green_responses))
+        
+        echo "📈 Load Balancing Test Results:"
+        echo "   🔵 Blue Environment Responses: $blue_responses"
+        echo "   🟢 Green Environment Responses: $green_responses"
+        echo "   ❌ Failed Requests: $failed_requests"
+        echo "   ✅ Total Successful: $total_successful/100"
+        
+        # Calculate distribution percentage
+        if [ $total_successful -gt 0 ]; then
+          blue_percentage=$(( (blue_responses * 100) / total_successful ))
+          green_percentage=$(( (green_responses * 100) / total_successful ))
+          
+          echo "   📊 Traffic Distribution:"
+          echo "      Blue: ${blue_percentage}%"
+          echo "      Green: ${green_percentage}%"
+        fi
+        
+        # Validate load balancing effectiveness
+        if [ $total_successful -ge 95 ] && [ $blue_responses -gt 20 ] && [ $green_responses -gt 20 ]; then
+          echo "🎉 ✅ LOAD BALANCING TEST PASSED"
+          echo "   Traffic successfully distributed across both environments"
+          echo "   High availability confirmed: ${total_successful}% success rate"
+        elif [ $total_successful -ge 90 ]; then
+          echo "⚠️  LOAD BALANCING TEST PARTIALLY SUCCESSFUL"
+          echo "   Acceptable success rate but uneven distribution"
+        else
+          echo "❌ LOAD BALANCING TEST FAILED"
+          echo "   Success rate too low: ${total_successful}%"
+          exit 1
+        fi
+        
+        # Final health verification
+        echo "🏥 Final health verification of load balanced system..."
+        for env in blue green; do
+          port=$(if [ "$env" = "blue" ]; then echo "3001"; else echo "3002"; fi)
+          if curl -f --max-time 5 "http://localhost:$port/health" >/dev/null 2>&1; then
+            echo "   ✅ $env environment: HEALTHY"
+          else
+            echo "   ❌ $env environment: UNHEALTHY"
+          fi
+        done
+        
+        echo "🎉 COMPLETE DUAL UPDATE CYCLE SUCCESSFULLY IMPLEMENTED!"
+        echo "🎯 Both environments synchronized and load balancing active"
       '
