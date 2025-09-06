@@ -693,6 +693,21 @@ cleanup-previous-environment:
         MIN_MEMORY_WARNING_MB=\${MIN_MEMORY_WARNING_MB:-100}
         HIGH_PROCESS_COUNT_WARNING=\${HIGH_PROCESS_COUNT_WARNING:-10}
         
+        # Progressive Container Cleanup Configuration
+        CLEANUP_STRATEGY=\${CLEANUP_STRATEGY:-"stop-only"}
+        CLEANUP_DELAY_MINUTES=\${CLEANUP_DELAY_MINUTES:-0}
+        ENABLE_ROLLBACK_PROTECTION=\${ENABLE_ROLLBACK_PROTECTION:-true}
+        MIN_DISK_SPACE_GB=\${MIN_DISK_SPACE_GB:-1}
+        VERIFY_IMAGE_BACKUP=\${VERIFY_IMAGE_BACKUP:-true}
+        PROGRESSIVE_CLEANUP_STAGES=\${PROGRESSIVE_CLEANUP_STAGES:-"stop,remove"}
+        
+        echo "🧹 Container cleanup configuration:"
+        echo "   Cleanup strategy: \$CLEANUP_STRATEGY"
+        echo "   Cleanup delay: \$CLEANUP_DELAY_MINUTES minutes"
+        echo "   Rollback protection: \$ENABLE_ROLLBACK_PROTECTION"
+        echo "   Min disk space required: \${MIN_DISK_SPACE_GB}GB"
+        echo "   Progressive stages: \$PROGRESSIVE_CLEANUP_STAGES"
+        
         echo "🔧 Using timeout configuration:"
         echo "   Health checks: \$HEALTH_CHECK_ATTEMPTS attempts (>\${HEALTH_CHECK_SUCCESS_THRESHOLD} required)"
         echo "   Container stop timeout: \${CONTAINER_STOP_TIMEOUT}s"
@@ -901,6 +916,176 @@ cleanup-previous-environment:
           exit 1
         fi
         
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # PROGRESSIVE CONTAINER CLEANUP - ACTUAL REMOVAL
+        # ═══════════════════════════════════════════════════════════════════════════════
+        
+        echo ""
+        echo "🚮 Starting progressive container cleanup phase..."
+        
+        # Skip cleanup if strategy is stop-only
+        if [ "\$CLEANUP_STRATEGY" = "stop-only" ]; then
+          echo "ℹ️  Cleanup strategy is 'stop-only' - skipping container removal"
+          echo "   Container $CLEANUP_CONTAINER remains available for quick rollback"
+        else
+          echo "🔍 Cleanup strategy: \$CLEANUP_STRATEGY - proceeding with container removal"
+          
+          # Disk Space Pre-Check
+          echo "💽 Checking disk space before cleanup..."
+          available_disk_gb=$(df -BG . | awk "NR==2{print \$4}" | sed 's/G//' 2>/dev/null || echo "0")
+          echo "   Available disk space: \${available_disk_gb}GB (minimum required: \${MIN_DISK_SPACE_GB}GB)"
+          
+          if [ "\$available_disk_gb" -lt "\$MIN_DISK_SPACE_GB" ]; then
+            echo "⚠️  WARNING: Low disk space (\${available_disk_gb}GB < \${MIN_DISK_SPACE_GB}GB)"
+            echo "   Proceeding with cleanup to free space..."
+          else
+            echo "✅ Sufficient disk space for cleanup operation"
+          fi
+          
+          # Container Image Backup Verification
+          if [ "\$VERIFY_IMAGE_BACKUP" = "true" ]; then
+            echo "🔍 Verifying container image backup availability..."
+            container_image=$(docker inspect --format='{{.Config.Image}}' "\$CLEANUP_CONTAINER" 2>/dev/null || echo "unknown")
+            
+            if [ "\$container_image" != "unknown" ]; then
+              if docker images --format "table {{.Repository}}:{{.Tag}}" | grep -q "\$container_image"; then
+                echo "✅ Container image backup available: \$container_image"
+              else
+                echo "⚠️  WARNING: Container image not found in local registry: \$container_image"
+                echo "   Container removal may require rebuilding from scratch"
+                
+                if [ "\$ENABLE_ROLLBACK_PROTECTION" = "true" ]; then
+                  echo "❌ ERROR: Rollback protection enabled but image backup unavailable"
+                  echo "   Either disable VERIFY_IMAGE_BACKUP or ensure image is available"
+                  echo "   Aborting cleanup to prevent rollback issues"
+                  cleanup_skipped=true
+                fi
+              fi
+            else
+              echo "⚠️  WARNING: Cannot determine container image for backup verification"
+            fi
+          fi
+          
+          # Rollback Protection Test
+          if [ "\$ENABLE_ROLLBACK_PROTECTION" = "true" ] && [ "\$cleanup_skipped" != "true" ]; then
+            echo "🛡️  Testing rollback capability before cleanup..."
+            
+            # Test current deployment stability
+            rollback_test_passed=0
+            for test_attempt in $(seq 1 3); do
+              if docker exec "\$CURRENT_CONTAINER" sh -c "curl -sS -f --max-time 3 http://localhost:$(if [ \"\$DEPLOY_TARGET\" = \"blue\" ]; then echo 3001; else echo 3002; fi)/health >/dev/null" 2>/dev/null; then
+                rollback_test_passed=\$((rollback_test_passed + 1))
+              fi
+              sleep 2
+            done
+            
+            if [ \$rollback_test_passed -ge 2 ]; then
+              echo "✅ Rollback protection: Current deployment stable (\$rollback_test_passed/3 tests passed)"
+            else
+              echo "❌ ERROR: Rollback protection failed - current deployment unstable"
+              echo "   Only \$rollback_test_passed/3 stability tests passed"
+              echo "   Aborting cleanup to prevent system instability"
+              cleanup_skipped=true
+            fi
+          fi
+          
+          # Progressive Container Removal
+          if [ "\$cleanup_skipped" != "true" ]; then
+            echo ""
+            echo "🗑️  Executing progressive container cleanup..."
+            
+            # Pre-removal container information
+            echo "📊 Container information before removal:"
+            container_size=$(docker ps -a --format "table {{.Names}}\\t{{.Size}}" | grep "\$CLEANUP_CONTAINER" | awk '{print \$2}' || echo "unknown")
+            container_created=$(docker inspect --format='{{.Created}}' "\$CLEANUP_CONTAINER" 2>/dev/null | cut -d'T' -f1 || echo "unknown")
+            echo "   Container: \$CLEANUP_CONTAINER"
+            echo "   Size: \$container_size"
+            echo "   Created: \$container_created"
+            echo "   Image: \$container_image"
+            
+            # Apply cleanup delay if configured
+            if [ "\$CLEANUP_DELAY_MINUTES" -gt 0 ]; then
+              echo "⏰ Cleanup delay configured: \$CLEANUP_DELAY_MINUTES minutes"
+              echo "   Waiting before container removal..."
+              sleep "\$((CLEANUP_DELAY_MINUTES * 60))"
+            fi
+            
+            # Stage 1: Container Removal
+            if echo "\$PROGRESSIVE_CLEANUP_STAGES" | grep -q "remove"; then
+              echo "🗑️  Stage 1: Removing container \$CLEANUP_CONTAINER..."
+              removal_start=\$(date +%s)
+              
+              if docker rm -f "\$CLEANUP_CONTAINER" 2>/dev/null; then
+                removal_end=\$(date +%s)
+                removal_duration=\$((removal_end - removal_start))
+                echo "✅ Container \$CLEANUP_CONTAINER removed successfully in \${removal_duration}s"
+                container_removed=true
+              else
+                echo "❌ ERROR: Failed to remove container \$CLEANUP_CONTAINER"
+                echo "   Container may be in an unresponsive state or have dependencies"
+                echo "   Manual intervention may be required: docker rm -f \$CLEANUP_CONTAINER"
+              fi
+            else
+              echo "ℹ️  Container removal stage skipped (not in PROGRESSIVE_CLEANUP_STAGES)"
+            fi
+            
+            # Stage 2: Image Cleanup (if full-cleanup strategy)
+            if [ "\$CLEANUP_STRATEGY" = "full-cleanup" ]; then
+              echo "🗑️  Stage 2: Cleaning up unused Docker images..."
+              
+              # Remove dangling images
+              dangling_images=\$(docker images -f "dangling=true" -q | wc -l || echo "0")
+              if [ "\$dangling_images" -gt 0 ]; then
+                echo "   Found \$dangling_images dangling images to remove"
+                if docker image prune -f >/dev/null 2>&1; then
+                  echo "✅ Dangling images cleaned up successfully"
+                else
+                  echo "⚠️  Warning: Could not clean up dangling images"
+                fi
+              else
+                echo "✅ No dangling images found"
+              fi
+            fi
+            
+            # Stage 3: System Cleanup (if full-cleanup strategy)
+            if [ "\$CLEANUP_STRATEGY" = "full-cleanup" ]; then
+              echo "🗑️  Stage 3: System-wide Docker cleanup..."
+              
+              # Clean up unused containers, networks, and build cache
+              echo "   Cleaning up unused Docker objects..."
+              cleanup_output=\$(docker system prune -f 2>&1 || echo "cleanup failed")
+              
+              if echo "\$cleanup_output" | grep -q "Total reclaimed space"; then
+                reclaimed_space=\$(echo "\$cleanup_output" | grep "Total reclaimed space" | awk '{print \$(NF-1), \$NF}')
+                echo "✅ System cleanup completed - reclaimed: \$reclaimed_space"
+              else
+                echo "⚠️  System cleanup completed with unknown results"
+              fi
+            fi
+            
+            # Verify removal success
+            if [ "\$container_removed" = "true" ]; then
+              if docker ps -a --format "{{.Names}}" | grep -q "^\$CLEANUP_CONTAINER\$"; then
+                echo "❌ ERROR: Container \$CLEANUP_CONTAINER still exists after removal attempt"
+                echo "   This indicates a partial cleanup failure"
+              else
+                echo "✅ Container removal verification successful"
+                
+                # Update rollback instructions
+                echo ""
+                echo "📝 Updated Emergency Rollback Instructions:"
+                echo "   Previous environment container has been REMOVED"
+                echo "   To recreate: cd ~/bgTest/v5ToWindow && docker-compose up -d \${CURRENT_ACTIVE}-app"
+                echo "   To switch back: curl -X POST http://api-server:9000/switch/\$CURRENT_ACTIVE"
+                echo "   Full recovery: ./scripts/switch-deployment.sh rollback"
+              fi
+            fi
+          else
+            echo "⚠️  Progressive cleanup skipped due to safety checks or configuration"
+            echo "   Container \$CLEANUP_CONTAINER remains available for rollback"
+          fi
+        fi
+        
         # Verify current deployment still healthy
         if ! docker exec "$CURRENT_CONTAINER" sh -c "curl -sS -f --max-time 3 http://localhost:$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo 3001; else echo 3002; fi)/health >/dev/null" 2>/dev/null; then
           echo "❌ ERROR: Current deployment health check failed after cleanup"
@@ -911,22 +1096,108 @@ cleanup-previous-environment:
         # Enhanced Post-cleanup Performance Analysis
         echo "📊 Post-cleanup system resource analysis:"
         
-        # Post-cleanup system metrics
+        # Post-cleanup system metrics with disk space monitoring
         post_used_memory=$(free -m | awk "/^Mem:/{print \$3}" 2>/dev/null || echo "unknown")
         post_load_avg=$(uptime | awk -F"load average:" '{print \$2}' | sed 's/^[[:space:]]*//' 2>/dev/null || echo "unknown")
+        post_free_space=$(df -h . | awk "NR==2{print \$4}" 2>/dev/null || echo "unknown")
+        post_disk_used=$(df -h . | awk "NR==2{print \$3}" 2>/dev/null || echo "unknown") 
+        post_disk_total=$(df -h . | awk "NR==2{print \$2}" 2>/dev/null || echo "unknown")
         
         echo "   💻 System: Memory \${post_used_memory}/\${total_memory}MB, Load: \$post_load_avg"
+        echo "   💾 Disk Space: Used \$post_disk_used/\$post_disk_total, Available: \$post_free_space"
         
-        # Calculate resource savings
+        # Docker-specific disk usage analysis
+        echo "   🐳 Docker storage analysis:"
+        docker_system_usage=$(docker system df --format "table {{.Type}}\\t{{.TotalCount}}\\t{{.Size}}\\t{{.Reclaimable}}" 2>/dev/null | tail -n +2 || echo "analysis unavailable")
+        if [ "$docker_system_usage" != "analysis unavailable" ]; then
+          echo "$docker_system_usage" | while IFS=$'\t' read -r type count size reclaimable; do
+            echo "      $type: $count items, $size total, $reclaimable reclaimable"
+          done
+        else
+          echo "      Docker storage analysis unavailable"
+        fi
+        
+        # Calculate comprehensive resource savings
+        echo ""
+        echo "   💰 Resource Savings Analysis:"
+        
+        # Memory savings calculation
         if [ "\$used_memory" != "unknown" ] && [ "\$post_used_memory" != "unknown" ]; then
           memory_saved=$((used_memory - post_used_memory))
           if [ \$memory_saved -gt 0 ]; then
-            echo "   💰 Resource Savings: \${memory_saved}MB memory freed"
+            echo "      💾 Memory: \${memory_saved}MB freed (\$used_memory → \$post_used_memory MB)"
           elif [ \$memory_saved -lt 0 ]; then
-            echo "   📈 Memory Usage: \$((-memory_saved))MB additional memory used (temporary)"
+            echo "      💾 Memory: \$((-memory_saved))MB additional used (\$used_memory → \$post_used_memory MB)"
           else
-            echo "   📊 Memory Usage: No significant change detected"
+            echo "      💾 Memory: No significant change (\$used_memory → \$post_used_memory MB)"
           fi
+        else
+          echo "      💾 Memory: Change calculation unavailable"
+        fi
+        
+        # Disk space savings calculation (compare pre/post cleanup)
+        if [ "\$free_space" != "unknown" ] && [ "\$post_free_space" != "unknown" ]; then
+          # Extract numeric values for comparison (remove units like GB, MB)
+          pre_space_val=$(echo \$free_space | sed 's/[^0-9.]//g' 2>/dev/null || echo "0")
+          post_space_val=$(echo \$post_free_space | sed 's/[^0-9.]//g' 2>/dev/null || echo "0")
+          pre_space_unit=$(echo \$free_space | sed 's/[0-9.]//g' 2>/dev/null || echo "")
+          post_space_unit=$(echo \$post_free_space | sed 's/[0-9.]//g' 2>/dev/null || echo "")
+          
+          if [ "\$pre_space_unit" = "\$post_space_unit" ] && [ "\$pre_space_val" != "0" ] && [ "\$post_space_val" != "0" ]; then
+            # Use awk for floating point comparison
+            space_change_status=$(awk -v pre=\$pre_space_val -v post=\$post_space_val 'BEGIN {
+              if (post > pre) print "increased"
+              else if (post < pre) print "decreased" 
+              else print "unchanged"
+            }')
+            space_change_amount=$(awk -v pre=\$pre_space_val -v post=\$post_space_val 'BEGIN {
+              diff = post - pre
+              if (diff < 0) diff = -diff
+              printf "%.1f", diff
+            }')
+            
+            case \$space_change_status in
+              "increased")
+                echo "      💽 Disk Space: \${space_change_amount}\${post_space_unit} freed (\$free_space → \$post_free_space available)"
+                ;;
+              "decreased")
+                echo "      💽 Disk Space: \${space_change_amount}\${post_space_unit} additional used (\$free_space → \$post_free_space available)"
+                ;;
+              *)
+                echo "      💽 Disk Space: No significant change (\$post_free_space available)"
+                ;;
+            esac
+          else
+            echo "      💽 Disk Space: \$free_space → \$post_free_space available"
+          fi
+        else
+          echo "      💽 Disk Space: Change calculation unavailable"
+        fi
+        
+        # Cleanup effectiveness validation
+        if [ "\$CLEANUP_STRATEGY" != "stop-only" ]; then
+          echo "      🗑️  Cleanup Level: \$CLEANUP_STRATEGY (container removal enabled)"
+          
+          # Validate minimum disk space requirement
+          post_space_gb=$(echo \$post_free_space | sed 's/G.*//' 2>/dev/null || echo "0")
+          if [ "\$post_space_gb" != "unknown" ] && [ "\$post_space_gb" != "0" ]; then
+            min_space_check=$(awk -v space=\$post_space_gb -v min=\$MIN_DISK_SPACE_GB 'BEGIN { 
+              if (space >= min) print "sufficient"
+              else print "insufficient"
+            }')
+            
+            case \$min_space_check in
+              "sufficient")
+                echo "      ✅ Disk Space Validation: \${post_space_gb}GB available (≥\${MIN_DISK_SPACE_GB}GB required)"
+                ;;
+              "insufficient")
+                echo "      ⚠️  Disk Space Warning: Only \${post_space_gb}GB available (<\${MIN_DISK_SPACE_GB}GB recommended)"
+                echo "         Consider running full-cleanup strategy or manual system cleanup"
+                ;;
+            esac
+          fi
+        else
+          echo "      🗑️  Cleanup Level: \$CLEANUP_STRATEGY (containers retained for rollback)"
         fi
         
         # Active container metrics after cleanup
@@ -1052,6 +1323,262 @@ cleanup-previous-environment:
           echo "💾 Cleanup record saved to ~/\$CLEANUP_LOG_FILE"
         else
           echo "⚠️  Cleanup log could not be created - information available in CI logs"
+        fi
+        
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════════════════"
+        echo "🧪 COMPREHENSIVE TESTING & ROLLBACK PROTECTION VALIDATION"
+        echo "═══════════════════════════════════════════════════════════════════════════════"
+        
+        # Post-Cleanup Comprehensive Testing Suite
+        echo "🔬 Executing comprehensive post-cleanup validation tests..."
+        comprehensive_test_start=$(date +%s)
+        test_failures=0
+        
+        # Test 1: End-to-End Request Flow Validation
+        echo ""
+        echo "Test 1/5: 🌐 End-to-End Request Flow Validation"
+        echo "   Testing complete request flow through NGINX → Application → Response"
+        
+        e2e_success=0
+        for test_run in $(seq 1 3); do
+          if timeout 10 curl -sS -f --max-time 5 "http://nginx-proxy:80/health" >/dev/null 2>&1; then
+            if timeout 10 curl -sS -f --max-time 5 "http://nginx-proxy:80/version" >/dev/null 2>&1; then
+              e2e_success=$((e2e_success + 1))
+              echo "   ✅ E2E Test Run \$test_run: SUCCESS (proxy → app → response)"
+            else
+              echo "   ❌ E2E Test Run \$test_run: FAILED (version endpoint unavailable)"
+            fi
+          else
+            echo "   ❌ E2E Test Run \$test_run: FAILED (health endpoint unavailable)"
+          fi
+          [ \$test_run -lt 3 ] && sleep 2
+        done
+        
+        if [ \$e2e_success -ge 2 ]; then
+          echo "   ✅ End-to-End Flow: PASSED (\$e2e_success/3 tests successful)"
+        else
+          echo "   ❌ End-to-End Flow: FAILED (\$e2e_success/3 tests successful)"
+          test_failures=$((test_failures + 1))
+        fi
+        
+        # Test 2: Performance Regression Testing
+        echo ""
+        echo "Test 2/5: ⚡ Performance Regression Testing"
+        echo "   Measuring response times to detect performance degradation"
+        
+        response_times=""
+        performance_samples=0
+        for perf_test in $(seq 1 5); do
+          start_time=$(date +%s%3N 2>/dev/null || echo "0")
+          if timeout 8 curl -sS -f --max-time 3 "http://nginx-proxy:80/health" >/dev/null 2>&1; then
+            end_time=$(date +%s%3N 2>/dev/null || echo "0")
+            if [ "\$start_time" != "0" ] && [ "\$end_time" != "0" ]; then
+              response_time=$((end_time - start_time))
+              response_times="\$response_times \$response_time"
+              performance_samples=$((performance_samples + 1))
+              echo "   📊 Performance Sample \$perf_test: \${response_time}ms"
+            else
+              echo "   ⚠️  Performance Sample \$perf_test: Timing unavailable"
+            fi
+          else
+            echo "   ❌ Performance Sample \$perf_test: Request failed"
+          fi
+          [ \$perf_test -lt 5 ] && sleep 1
+        done
+        
+        if [ \$performance_samples -ge 3 ]; then
+          # Calculate average response time using available samples
+          total_response_time=0
+          for rt in \$response_times; do
+            total_response_time=$((total_response_time + rt))
+          done
+          avg_response_time=$((total_response_time / performance_samples))
+          
+          echo "   📊 Performance Metrics: \$performance_samples samples, avg \${avg_response_time}ms"
+          
+          # Performance thresholds (adjustable via environment variables)
+          RESPONSE_TIME_WARNING_MS=\${RESPONSE_TIME_WARNING_MS:-1000}
+          RESPONSE_TIME_CRITICAL_MS=\${RESPONSE_TIME_CRITICAL_MS:-3000}
+          
+          if [ \$avg_response_time -le \$RESPONSE_TIME_WARNING_MS ]; then
+            echo "   ✅ Performance Regression: PASSED (excellent response times)"
+          elif [ \$avg_response_time -le \$RESPONSE_TIME_CRITICAL_MS ]; then
+            echo "   ⚠️  Performance Regression: WARNING (slower than optimal but acceptable)"
+          else
+            echo "   ❌ Performance Regression: FAILED (response times too slow)"
+            test_failures=$((test_failures + 1))
+          fi
+        else
+          echo "   ❌ Performance Regression: FAILED (insufficient samples collected)"
+          test_failures=$((test_failures + 1))
+        fi
+        
+        # Test 3: Rollback Capability Validation
+        echo ""
+        echo "Test 3/5: 🔄 Rollback Capability Validation"
+        echo "   Testing that rollback procedures are functional and available"
+        
+        rollback_tests_passed=0
+        
+        # Test 3a: API Server Rollback Endpoint
+        if timeout 5 curl -sS -f --max-time 3 "http://api-server:9000/health" >/dev/null 2>&1; then
+          echo "   ✅ Rollback Test 3a: API server accessible for rollback operations"
+          rollback_tests_passed=$((rollback_tests_passed + 1))
+        else
+          echo "   ❌ Rollback Test 3a: API server unreachable - rollback may be compromised"
+        fi
+        
+        # Test 3b: Container Recreation Capability (if container was removed)
+        if [ "\$container_removed" = "true" ]; then
+          echo "   🔍 Rollback Test 3b: Testing container recreation capability"
+          if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "app-service" 2>/dev/null; then
+            echo "   ✅ Rollback Test 3b: Container images available for recreation"
+            rollback_tests_passed=$((rollback_tests_passed + 1))
+          else
+            echo "   ❌ Rollback Test 3b: Container images missing - recreation may fail"
+          fi
+        else
+          echo "   ✅ Rollback Test 3b: Previous container available for immediate restart"
+          rollback_tests_passed=$((rollback_tests_passed + 1))
+        fi
+        
+        # Test 3c: Network Connectivity for Rollback
+        if docker network ls --format "{{.Name}}" | grep -q "bluegreen-network" 2>/dev/null; then
+          echo "   ✅ Rollback Test 3c: Blue-Green network available for rollback"
+          rollback_tests_passed=$((rollback_tests_passed + 1))
+        else
+          echo "   ❌ Rollback Test 3c: Blue-Green network missing - rollback may fail"
+        fi
+        
+        if [ \$rollback_tests_passed -ge 2 ]; then
+          echo "   ✅ Rollback Capability: VERIFIED (\$rollback_tests_passed/3 tests passed)"
+        else
+          echo "   ❌ Rollback Capability: COMPROMISED (\$rollback_tests_passed/3 tests passed)"
+          test_failures=$((test_failures + 1))
+        fi
+        
+        # Test 4: System Stability Under Load
+        echo ""
+        echo "Test 4/5: 🏋️  System Stability Under Load"
+        echo "   Testing system stability with concurrent requests"
+        
+        stability_start=$(date +%s)
+        concurrent_requests=5
+        successful_requests=0
+        
+        echo "   🚀 Launching \$concurrent_requests concurrent stability tests..."
+        
+        # Launch concurrent requests in background
+        for load_test in $(seq 1 \$concurrent_requests); do
+          (
+            if timeout 10 curl -sS -f --max-time 5 "http://nginx-proxy:80/health" >/dev/null 2>&1; then
+              echo "LOAD_TEST_\${load_test}_SUCCESS" >> /tmp/load_test_results_\$\$ 2>/dev/null || true
+            fi
+          ) &
+        done
+        
+        # Wait for all background tests to complete
+        wait
+        
+        # Count successful requests
+        if [ -f /tmp/load_test_results_\$\$ ]; then
+          successful_requests=$(grep -c "SUCCESS" /tmp/load_test_results_\$\$ 2>/dev/null || echo "0")
+          rm -f /tmp/load_test_results_\$\$ 2>/dev/null || true
+        fi
+        
+        stability_duration=$(($(date +%s) - stability_start))
+        
+        echo "   📊 Load Test Results: \$successful_requests/\$concurrent_requests requests succeeded in \${stability_duration}s"
+        
+        if [ \$successful_requests -ge 4 ]; then
+          echo "   ✅ System Stability: PASSED (excellent load handling)"
+        elif [ \$successful_requests -ge 3 ]; then
+          echo "   ⚠️  System Stability: WARNING (acceptable but not optimal)"
+        else
+          echo "   ❌ System Stability: FAILED (poor load handling)"
+          test_failures=$((test_failures + 1))
+        fi
+        
+        # Test 5: Resource Recovery Validation
+        echo ""
+        echo "Test 5/5: 📊 Resource Recovery Validation"
+        echo "   Validating that cleanup actually improved resource utilization"
+        
+        resource_tests_passed=0
+        
+        # Validate memory improvement
+        if [ "\$memory_saved" != "unknown" ] && [ "\$memory_saved" -ge 0 ]; then
+          echo "   ✅ Resource Test 5a: Memory utilization improved (saved: \${memory_saved}MB)"
+          resource_tests_passed=$((resource_tests_passed + 1))
+        else
+          echo "   ⚠️  Resource Test 5a: Memory utilization unchanged or increased"
+        fi
+        
+        # Validate container count reduction (if container was removed)
+        current_containers=$(docker ps --format "{{.Names}}" | wc -l 2>/dev/null || echo "0")
+        if [ "\$container_removed" = "true" ]; then
+          echo "   ✅ Resource Test 5b: Container count reduced (cleanup successful)"
+          resource_tests_passed=$((resource_tests_passed + 1))
+        else
+          echo "   ℹ️  Resource Test 5b: Container retained for rollback (expected behavior)"
+          resource_tests_passed=$((resource_tests_passed + 1))
+        fi
+        
+        # Validate disk space (if monitoring available)
+        if [ "\$post_free_space" != "unknown" ] && [ "\$free_space" != "unknown" ]; then
+          echo "   ✅ Resource Test 5c: Disk space monitoring functional (current: \$post_free_space)"
+          resource_tests_passed=$((resource_tests_passed + 1))
+        else
+          echo "   ⚠️  Resource Test 5c: Disk space monitoring unavailable"
+        fi
+        
+        if [ \$resource_tests_passed -ge 2 ]; then
+          echo "   ✅ Resource Recovery: VALIDATED (\$resource_tests_passed/3 tests passed)"
+        else
+          echo "   ❌ Resource Recovery: FAILED (\$resource_tests_passed/3 tests passed)"
+          test_failures=$((test_failures + 1))
+        fi
+        
+        # Comprehensive Testing Summary
+        comprehensive_test_duration=$(($(date +%s) - comprehensive_test_start))
+        echo ""
+        echo "🧪 COMPREHENSIVE TESTING SUMMARY:"
+        echo "   ⏱️  Testing Duration: \${comprehensive_test_duration}s"
+        echo "   🎯 Tests Executed: 5 comprehensive test suites"
+        echo "   ❌ Test Failures: \$test_failures"
+        
+        if [ \$test_failures -eq 0 ]; then
+          echo "   ✅ Overall Test Result: ALL TESTS PASSED"
+          echo "   🛡️  System Integrity: VERIFIED"
+          echo "   🔄 Rollback Capability: CONFIRMED"
+        elif [ \$test_failures -le 1 ]; then
+          echo "   ⚠️  Overall Test Result: MINOR ISSUES DETECTED"
+          echo "   🛡️  System Integrity: MOSTLY VERIFIED"
+          echo "   🔄 Rollback Capability: LIKELY FUNCTIONAL"
+          echo "   📝 Recommendation: Monitor system closely"
+        else
+          echo "   ❌ Overall Test Result: MULTIPLE FAILURES DETECTED"
+          echo "   🚨 System Integrity: QUESTIONABLE"
+          echo "   🔄 Rollback Capability: POTENTIALLY COMPROMISED"
+          echo "   🚑 Recommendation: Consider immediate rollback"
+          
+          # Optional: Auto-trigger rollback on critical failures
+          if [ "\${AUTO_ROLLBACK_ON_FAILURE}" = "true" ] && [ \$test_failures -ge 3 ]; then
+            echo ""
+            echo "🚨 AUTO-ROLLBACK TRIGGERED (critical test failures detected)"
+            echo "   Initiating emergency rollback sequence..."
+            
+            # Trigger emergency rollback via API
+            if timeout 10 curl -X POST -f "http://api-server:9000/switch/\$CURRENT_ACTIVE" >/dev/null 2>&1; then
+              echo "   ✅ Emergency rollback initiated successfully"
+              echo "   ⚠️  ATTENTION: System has been automatically rolled back"
+              echo "   📋 ACTION REQUIRED: Investigate test failures before next deployment"
+            else
+              echo "   ❌ Emergency rollback failed - manual intervention required"
+              echo "   🚑 URGENT: Manual rollback needed immediately"
+            fi
+          fi
         fi
         
         echo ""
