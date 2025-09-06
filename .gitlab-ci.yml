@@ -17,7 +17,7 @@ stages:
   - verify-deployment-dev
   - cleanup-dev
 
-# Common variables
+# Common variables.
 variables:
   GIT_DEPTH: "0"
 #  CI_DEBUG_TRACE: "true"  # 상세 디버그 로그 활성화
