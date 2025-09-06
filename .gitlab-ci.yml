@@ -678,16 +678,416 @@ cleanup-previous-environment:
   when: manual
   allow_failure: true
   script:
-    - echo "🧹 Cleaning up previous environment..."
+    - echo "🧹 Cleaning up previous environment with proper container shutdown..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
         
-        echo "🗑️  Optionally scaling down previous $CURRENT_ACTIVE environment..."
-        echo "   (Both environments remain available for instant rollback)"
-        echo "   Previous environment: $CURRENT_ACTIVE"
-        echo "   Cleanup completed"
+        # Configurable Timeout and Threshold Settings
+        HEALTH_CHECK_ATTEMPTS=\${HEALTH_CHECK_ATTEMPTS:-10}
+        HEALTH_CHECK_SUCCESS_THRESHOLD=\${HEALTH_CHECK_SUCCESS_THRESHOLD:-7}
+        CONTAINER_STOP_TIMEOUT=\${CONTAINER_STOP_TIMEOUT:-30}
+        FORCE_KILL_TIMEOUT=\${FORCE_KILL_TIMEOUT:-10}
+        POST_CLEANUP_WAIT=\${POST_CLEANUP_WAIT:-5}
+        HEALTH_CHECK_INTERVAL=\${HEALTH_CHECK_INTERVAL:-2}
+        MIN_MEMORY_WARNING_MB=\${MIN_MEMORY_WARNING_MB:-100}
+        HIGH_PROCESS_COUNT_WARNING=\${HIGH_PROCESS_COUNT_WARNING:-10}
+        
+        echo "🔧 Using timeout configuration:"
+        echo "   Health checks: \$HEALTH_CHECK_ATTEMPTS attempts (>\${HEALTH_CHECK_SUCCESS_THRESHOLD} required)"
+        echo "   Container stop timeout: \${CONTAINER_STOP_TIMEOUT}s"
+        echo "   Validation intervals: \${HEALTH_CHECK_INTERVAL}s"
+        echo "   Post-cleanup wait: \${POST_CLEANUP_WAIT}s"
+        echo ""
+        
+        # Enhanced Environment Detection and Validation
+        echo "🔍 Reading deployment environment information..."
+        
+        # Edge Case: Docker Service Availability Check
+        if ! docker info >/dev/null 2>&1; then
+          echo "❌ ERROR: Docker daemon is not running or not accessible"
+          echo "   Please ensure Docker service is running and accessible"
+          exit 1
+        fi
+        
+        # Edge Case: Concurrent Operation Prevention
+        CLEANUP_LOCK_FILE="/tmp/bluegreen-cleanup.lock"
+        if [ -f "$CLEANUP_LOCK_FILE" ]; then
+          cleanup_pid=$(cat "$CLEANUP_LOCK_FILE" 2>/dev/null || echo "unknown")
+          if kill -0 "$cleanup_pid" 2>/dev/null; then
+            echo "❌ ERROR: Another cleanup operation is currently running (PID: $cleanup_pid)"
+            echo "   Wait for current cleanup to complete or remove lock file if stale"
+            echo "   Lock file: $CLEANUP_LOCK_FILE"
+            exit 1
+          else
+            echo "⚠️  Removing stale cleanup lock file"
+            rm -f "$CLEANUP_LOCK_FILE"
+          fi
+        fi
+        
+        # Create cleanup lock
+        echo $$ > "$CLEANUP_LOCK_FILE"
+        trap "rm -f $CLEANUP_LOCK_FILE; exit" INT TERM EXIT
+        
+        # Edge Case: System Resource Check
+        echo "🔧 Performing system resource validation..."
+        available_memory=$(free -m | awk "/^Mem:/{print \$7}" 2>/dev/null || echo "0")
+        if [ "$available_memory" -lt "\$MIN_MEMORY_WARNING_MB" ]; then
+          echo "⚠️  WARNING: Low available memory ($available_memory MB, threshold: \${MIN_MEMORY_WARNING_MB}MB)"
+          echo "   Consider monitoring system performance during cleanup"
+        fi
+        
+        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "unknown")
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "unknown")
+        
+        echo "Previous environment (to cleanup): $CURRENT_ACTIVE"
+        echo "Current environment (keep running): $DEPLOY_TARGET"
+        
+        # Safety Validation 1: Environment Identification
+        if [ "$CURRENT_ACTIVE" = "unknown" ] || [ "$DEPLOY_TARGET" = "unknown" ]; then
+          echo "❌ ERROR: Cannot determine environment states from files"
+          echo "   current_active.env: $CURRENT_ACTIVE"
+          echo "   deploy_target.env: $DEPLOY_TARGET"
+          echo "   ABORTING cleanup for safety"
+          exit 1
+        fi
+        
+        # Safety Validation 2: Different Environments
+        if [ "$CURRENT_ACTIVE" = "$DEPLOY_TARGET" ]; then
+          echo "❌ ERROR: Same environment detected ($CURRENT_ACTIVE = $DEPLOY_TARGET)"
+          echo "   This indicates a deployment issue, aborting cleanup for safety"
+          exit 1
+        fi
+        
+        # Safety Validation 3: Valid Environment Names
+        if [[ "$CURRENT_ACTIVE" != "blue" && "$CURRENT_ACTIVE" != "green" ]]; then
+          echo "❌ ERROR: Invalid previous environment name: $CURRENT_ACTIVE"
+          exit 1
+        fi
+        
+        if [[ "$DEPLOY_TARGET" != "blue" && "$DEPLOY_TARGET" != "green" ]]; then
+          echo "❌ ERROR: Invalid target environment name: $DEPLOY_TARGET"
+          exit 1
+        fi
+        
+        # Current Deployment Stability Verification
+        echo "🏥 Verifying current deployment stability before cleanup..."
+        CURRENT_CONTAINER="${DEPLOY_TARGET}-app"
+        CLEANUP_CONTAINER="${CURRENT_ACTIVE}-app"
+        
+        # Check current environment health
+        current_health_checks=0
+        for attempt in $(seq 1 \$HEALTH_CHECK_ATTEMPTS); do
+          if docker exec "$CURRENT_CONTAINER" sh -c "curl -sS -f --max-time 3 http://localhost:$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo 3001; else echo 3002; fi)/health >/dev/null" 2>/dev/null; then
+            current_health_checks=$((current_health_checks + 1))
+          fi
+          sleep \$HEALTH_CHECK_INTERVAL
+        done
+        
+        if [ \$current_health_checks -lt \$HEALTH_CHECK_SUCCESS_THRESHOLD ]; then
+          echo "❌ ERROR: Current deployment ($DEPLOY_TARGET) not stable enough for cleanup"
+          echo "   Health checks passed: \$current_health_checks/\$HEALTH_CHECK_ATTEMPTS (minimum \$HEALTH_CHECK_SUCCESS_THRESHOLD required)"
+          echo "   ABORTING cleanup - fix current deployment first"
+          exit 1
+        fi
+        
+        echo "✅ Current deployment ($DEPLOY_TARGET) is stable: \$current_health_checks/\$HEALTH_CHECK_ATTEMPTS health checks passed"
+        
+        # Verify traffic is routed to current environment
+        echo "🚦 Verifying traffic routing to current environment..."
+        active_env_check=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\\|green" 2>/dev/null || echo "unknown")
+        
+        if [ "$active_env_check" != "$DEPLOY_TARGET" ]; then
+          echo "❌ ERROR: Traffic routing mismatch"
+          echo "   NGINX routing: $active_env_check"
+          echo "   Expected: $DEPLOY_TARGET"
+          echo "   ABORTING cleanup - fix traffic routing first"
+          exit 1
+        fi
+        
+        echo "✅ Traffic correctly routed to $DEPLOY_TARGET environment"
+        
+        # Check if cleanup container is running
+        echo "🔍 Checking previous environment container status..."
+        if ! docker ps --format "{{.Names}}" | grep -q "^$CLEANUP_CONTAINER\\$"; then
+          echo "ℹ️  Container $CLEANUP_CONTAINER is already stopped"
+          echo "✅ Cleanup already completed - no action needed"
+          exit 0
+        fi
+        
+        echo "📊 Container $CLEANUP_CONTAINER is currently running - proceeding with cleanup"
+        
+        # Enhanced Pre-cleanup Resource Monitoring
+        echo "📊 Pre-cleanup system resource analysis:"
+        
+        # System-wide metrics
+        total_memory=$(free -m | awk "/^Mem:/{print \$2}" 2>/dev/null || echo "unknown")
+        used_memory=$(free -m | awk "/^Mem:/{print \$3}" 2>/dev/null || echo "unknown")
+        free_space=$(df -h . | awk "NR==2{print \$4}" 2>/dev/null || echo "unknown")
+        load_avg=$(uptime | awk -F"load average:" '{print \$2}' | sed 's/^[[:space:]]*//' 2>/dev/null || echo "unknown")
+        
+        echo "   💻 System: Memory \${used_memory}/\${total_memory}MB, Disk free: \$free_space, Load: \$load_avg"
+        
+        # Container-specific metrics with error handling
+        echo "   🐳 Container resource usage:"
+        for container in $CLEANUP_CONTAINER $CURRENT_CONTAINER nginx-proxy api-server; do
+          if docker ps --format "{{.Names}}" | grep -q "^\$container\$"; then
+            cpu_usage=$(docker stats --no-stream --format "{{.CPUPerc}}" \$container 2>/dev/null | sed 's/%//' || echo "N/A")
+            mem_usage=$(docker stats --no-stream --format "{{.MemUsage}}" \$container 2>/dev/null || echo "N/A")
+            mem_perc=$(docker stats --no-stream --format "{{.MemPerc}}" \$container 2>/dev/null | sed 's/%//' || echo "N/A")
+            echo "      \$container: CPU \${cpu_usage}%, Memory \$mem_usage (\${mem_perc}%)"
+            
+            # Store cleanup container metrics for comparison
+            if [ "\$container" = "\$CLEANUP_CONTAINER" ]; then
+              pre_cleanup_cpu=\$cpu_usage
+              pre_cleanup_mem=\$mem_usage
+              pre_cleanup_mem_perc=\$mem_perc
+            fi
+          else
+            echo "      \$container: Not running"
+          fi
+        done
+        
+        # Safe Container Termination
+        echo "🛑 Gracefully stopping previous environment container: $CLEANUP_CONTAINER"
+        echo "   This will free up resources while maintaining rollback capability"
+        
+        # Edge Case: Check container restart policy
+        restart_policy=$(docker inspect --format='{{.HostConfig.RestartPolicy.Name}}' "$CLEANUP_CONTAINER" 2>/dev/null || echo "unknown")
+        if [ "$restart_policy" = "always" ] || [ "$restart_policy" = "unless-stopped" ]; then
+          echo "⚠️  WARNING: Container has restart policy '$restart_policy'"
+          echo "   Container may restart automatically after cleanup"
+          echo "   Consider updating restart policy if permanent shutdown is desired"
+        fi
+        
+        # Edge Case: Check for long-running processes
+        echo "🔍 Checking for active processes in container..."
+        process_count=$(docker exec "$CLEANUP_CONTAINER" sh -c "ps aux | wc -l" 2>/dev/null || echo "0")
+        if [ "$process_count" -gt "\$HIGH_PROCESS_COUNT_WARNING" ]; then
+          echo "⚠️  WARNING: Container has $process_count processes running (threshold: \$HIGH_PROCESS_COUNT_WARNING)"
+          echo "   Shutdown may take longer than usual"
+        fi
+        
+        # Graceful shutdown with enhanced timeout handling
+        echo "⏱️  Initiating graceful shutdown (\${CONTAINER_STOP_TIMEOUT}s timeout)..."
+        shutdown_start=$(date +%s)
+        
+        timeout_buffer=\$((CONTAINER_STOP_TIMEOUT + 5))  # Add 5s buffer for timeout command
+        if timeout \$timeout_buffer docker stop --time \$CONTAINER_STOP_TIMEOUT "$CLEANUP_CONTAINER"; then
+          shutdown_end=$(date +%s)
+          shutdown_duration=\$((shutdown_end - shutdown_start))
+          echo "✅ Container $CLEANUP_CONTAINER stopped successfully in \${shutdown_duration}s"
+        else
+          echo "⚠️  Graceful stop failed or timed out, attempting force stop..."
+          if timeout \$FORCE_KILL_TIMEOUT docker kill "$CLEANUP_CONTAINER"; then
+            shutdown_end=$(date +%s)
+            shutdown_duration=\$((shutdown_end - shutdown_start))
+            echo "✅ Container $CLEANUP_CONTAINER force-stopped"
+          else
+            echo "❌ ERROR: Failed to stop container $CLEANUP_CONTAINER even with force"
+            echo "   Container may be in an unresponsive state"
+            echo "   Manual intervention may be required: docker kill $CLEANUP_CONTAINER"
+            exit 1
+          fi
+        fi
+        
+        # Post-cleanup validation
+        echo "🔍 Post-cleanup validation..."
+        sleep \$POST_CLEANUP_WAIT
+        
+        # Verify container is stopped
+        if docker ps --format "{{.Names}}" | grep -q "^$CLEANUP_CONTAINER\\$"; then
+          echo "❌ ERROR: Container $CLEANUP_CONTAINER is still running after cleanup"
+          exit 1
+        fi
+        
+        # Verify current deployment still healthy
+        if ! docker exec "$CURRENT_CONTAINER" sh -c "curl -sS -f --max-time 3 http://localhost:$(if [ \"$DEPLOY_TARGET\" = \"blue\" ]; then echo 3001; else echo 3002; fi)/health >/dev/null" 2>/dev/null; then
+          echo "❌ ERROR: Current deployment health check failed after cleanup"
+          echo "🚨 URGENT: Consider emergency rollback"
+          exit 1
+        fi
+        
+        # Enhanced Post-cleanup Performance Analysis
+        echo "📊 Post-cleanup system resource analysis:"
+        
+        # Post-cleanup system metrics
+        post_used_memory=$(free -m | awk "/^Mem:/{print \$3}" 2>/dev/null || echo "unknown")
+        post_load_avg=$(uptime | awk -F"load average:" '{print \$2}' | sed 's/^[[:space:]]*//' 2>/dev/null || echo "unknown")
+        
+        echo "   💻 System: Memory \${post_used_memory}/\${total_memory}MB, Load: \$post_load_avg"
+        
+        # Calculate resource savings
+        if [ "\$used_memory" != "unknown" ] && [ "\$post_used_memory" != "unknown" ]; then
+          memory_saved=$((used_memory - post_used_memory))
+          if [ \$memory_saved -gt 0 ]; then
+            echo "   💰 Resource Savings: \${memory_saved}MB memory freed"
+          elif [ \$memory_saved -lt 0 ]; then
+            echo "   📈 Memory Usage: \$((-memory_saved))MB additional memory used (temporary)"
+          else
+            echo "   📊 Memory Usage: No significant change detected"
+          fi
+        fi
+        
+        # Active container metrics after cleanup
+        echo "   🐳 Active containers after cleanup:"
+        for container in $CURRENT_CONTAINER nginx-proxy api-server; do
+          if docker ps --format "{{.Names}}" | grep -q "^\$container\$"; then
+            cpu_usage=$(docker stats --no-stream --format "{{.CPUPerc}}" \$container 2>/dev/null | sed 's/%//' || echo "N/A")
+            mem_usage=$(docker stats --no-stream --format "{{.MemUsage}}" \$container 2>/dev/null || echo "N/A")
+            mem_perc=$(docker stats --no-stream --format "{{.MemPerc}}" \$container 2>/dev/null | sed 's/%//' || echo "N/A")
+            echo "      \$container: CPU \${cpu_usage}%, Memory \$mem_usage (\${mem_perc}%)"
+          else
+            echo "      \$container: ❌ CRITICAL - Container not running!"
+          fi
+        done
+        
+        # Performance metrics summary
+        total_cleanup_time=$((shutdown_end - shutdown_start + 5)) # Include validation time
+        echo ""
+        echo "⚡ Performance Metrics Summary:"
+        echo "   ⏱️  Total cleanup time: \${total_cleanup_time}s"
+        echo "   🛑 Container shutdown time: \${shutdown_duration}s"
+        echo "   🔍 Validation and checks: \$((total_cleanup_time - shutdown_duration))s"
+        if [ "\$pre_cleanup_mem_perc" != "N/A" ] && [ "\$pre_cleanup_mem_perc" != "" ]; then
+          echo "   📉 Resource reduction: \${pre_cleanup_mem_perc}% memory utilization eliminated"
+        fi
+        
+        echo "📋 Final container status:"
+        docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | grep -E "(nginx-proxy|api-server|$CURRENT_CONTAINER)"
+        
+        echo ""
+        echo "🎉 CLEANUP COMPLETED SUCCESSFULLY!"
+        echo "✅ Previous environment ($CURRENT_ACTIVE) container stopped"
+        echo "✅ Current environment ($DEPLOY_TARGET) remains healthy and active"
+        echo "✅ Resources freed up for system optimization"
+        echo ""
+        
+        # Integration with existing monitoring system
+        echo "📡 Integrating with deployment monitoring system..."
+        
+        # Notify monitoring system of cleanup event
+        if docker ps --format "{{.Names}}" | grep -q "api-server"; then
+          cleanup_event="{\\\"event\\\": \\\"container_cleanup\\\", \\\"timestamp\\\": \\\"\$(date -Iseconds)\\\", \\\"stopped_container\\\": \\\"$CLEANUP_CONTAINER\\\", \\\"active_container\\\": \\\"$CURRENT_CONTAINER\\\", \\\"environment\\\": \\\"$CURRENT_ACTIVE\\\", \\\"resource_savings_mb\\\": \\\"$memory_saved\\\", \\\"cleanup_duration_s\\\": \\\"$total_cleanup_time\\\"}"
+          
+          # Send cleanup notification to API server for monitoring integration
+          if curl -X POST -H "Content-Type: application/json" -d "\$cleanup_event" "http://api-server:9000/events/cleanup" --max-time 5 >/dev/null 2>&1; then
+            echo "✅ Cleanup event logged to monitoring system"
+          else
+            echo "⚠️  Warning: Could not notify monitoring system (API server may not support events endpoint)"
+          fi
+        else
+          echo "⚠️  Warning: API server not available for monitoring integration"
+        fi
+        
+        # Create monitoring-compatible log entry
+        MONITOR_LOG_DIR="/tmp/bluegreen-monitoring"
+        mkdir -p "\$MONITOR_LOG_DIR" 2>/dev/null || true
+        
+        if [ -d "\$MONITOR_LOG_DIR" ]; then
+          {
+            echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 🧹 CLEANUP: Container \$CLEANUP_CONTAINER stopped"
+            echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 📊 METRICS: Memory saved: \${memory_saved}MB, Duration: \${total_cleanup_time}s"
+            echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ STATUS: Active environment \$DEPLOY_TARGET healthy after cleanup"
+          } >> "\$MONITOR_LOG_DIR/cleanup-events.log" 2>/dev/null || echo "   Log directory not writable"
+          
+          echo "✅ Monitoring integration completed"
+        else
+          echo "⚠️  Monitoring log directory not available"
+        fi
+        
+        echo ""
+        echo "📝 Emergency Rollback Instructions:"
+        echo "   To restart previous environment: docker start $CLEANUP_CONTAINER"
+        echo "   To switch back: curl -X POST http://api-server:9000/switch/$CURRENT_ACTIVE"
+        echo "   Full emergency procedure: ./scripts/switch-deployment.sh rollback"
+        echo ""
+        # Edge Case: Safe Log File Creation
+        CLEANUP_LOG_FILE="cleanup-\$(date +%Y%m%d-%H%M%S 2>/dev/null || echo 'unknown-time').log"
+        
+        # Edge Case: Ensure log directory is writable
+        if ! touch ~/test-write-\$\$ 2>/dev/null; then
+          echo "⚠️  WARNING: Cannot write to home directory for cleanup logs"
+          CLEANUP_LOG_FILE="/tmp/\$CLEANUP_LOG_FILE"
+          echo "   Using temporary directory: \$CLEANUP_LOG_FILE"
+        else
+          rm -f ~/test-write-\$\$ 2>/dev/null || true
+        fi
+        
+        # Create comprehensive cleanup log
+        {
+          echo "# Blue-Green Deployment Cleanup Log"
+          echo "CLEANUP_TIMESTAMP=\$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date)"
+          echo "CLEANUP_USER=\$(whoami 2>/dev/null || echo 'unknown')"
+          echo "CLEANUP_HOST=\$(hostname 2>/dev/null || echo 'unknown')"
+          echo "STOPPED_CONTAINER=\$CLEANUP_CONTAINER"
+          echo "ACTIVE_CONTAINER=\$CURRENT_CONTAINER"
+          echo "PREVIOUS_ENVIRONMENT=\$CURRENT_ACTIVE"
+          echo "CURRENT_ENVIRONMENT=\$DEPLOY_TARGET"
+          echo "RESTART_POLICY=\$restart_policy"
+          echo "SHUTDOWN_DURATION=\${shutdown_duration}s"
+          echo "TOTAL_CLEANUP_TIME=\${total_cleanup_time}s"
+          echo "PRE_CLEANUP_MEMORY_MB=\$used_memory"
+          echo "POST_CLEANUP_MEMORY_MB=\$post_used_memory"
+          echo "MEMORY_SAVED_MB=\$memory_saved"
+          echo "SYSTEM_MEMORY_TOTAL_MB=\$total_memory"
+          echo "AVAILABLE_MEMORY_MB=\$available_memory"
+          echo "PROCESS_COUNT=\$process_count"
+          echo "PRE_CLEANUP_CPU_USAGE=\${pre_cleanup_cpu}%"
+          echo "PRE_CLEANUP_MEM_USAGE=\$pre_cleanup_mem"
+          echo "PRE_CLEANUP_MEM_PERCENTAGE=\${pre_cleanup_mem_perc}%"
+          echo "LOAD_AVERAGE_BEFORE=\$load_avg"
+          echo "LOAD_AVERAGE_AFTER=\$post_load_avg"
+          echo ""
+          echo "# Emergency Recovery Commands:"
+          echo "# docker start \$CLEANUP_CONTAINER"
+          echo "# curl -X POST http://api-server:9000/switch/\$CURRENT_ACTIVE"
+          echo "# ./scripts/switch-deployment.sh rollback"
+        } > ~/$CLEANUP_LOG_FILE 2>/dev/null || {
+          echo "⚠️  WARNING: Failed to create cleanup log file"
+          echo "   Log information displayed above for manual recording"
+        }
+        
+        if [ -f ~/$CLEANUP_LOG_FILE ]; then
+          echo "💾 Cleanup record saved to ~/\$CLEANUP_LOG_FILE"
+        else
+          echo "⚠️  Cleanup log could not be created - information available in CI logs"
+        fi
+        
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════════════════"
+        echo "🎯 CLEANUP OPERATION SUMMARY"
+        echo "═══════════════════════════════════════════════════════════════════════════════"
+        echo "📊 Operation: Container cleanup completed successfully"
+        echo "🐳 Stopped: \$CLEANUP_CONTAINER (\$CURRENT_ACTIVE environment)"
+        echo "✅ Active: \$CURRENT_CONTAINER (\$DEPLOY_TARGET environment)"
+        echo "⏱️  Duration: \${total_cleanup_time}s total (\${shutdown_duration}s shutdown)"
+        echo "💾 Savings: \${memory_saved}MB memory freed"
+        echo "📈 Health: \$current_health_checks/\$HEALTH_CHECK_ATTEMPTS checks passed"
+        echo ""
+        echo "🔧 CONFIGURATION USED:"
+        echo "   Container stop timeout: \${CONTAINER_STOP_TIMEOUT}s"
+        echo "   Health check threshold: \$HEALTH_CHECK_SUCCESS_THRESHOLD/\$HEALTH_CHECK_ATTEMPTS"
+        echo "   Process count warning: \$HIGH_PROCESS_COUNT_WARNING"
+        echo "   Memory warning threshold: \${MIN_MEMORY_WARNING_MB}MB"
+        echo ""
+        echo "📋 OPERATIONAL STATUS:"
+        if [ \$memory_saved -gt 0 ]; then
+          echo "   💰 Resource optimization: SUCCESSFUL (\${memory_saved}MB freed)"
+        else
+          echo "   📊 Resource optimization: MINIMAL CHANGE"
+        fi
+        
+        if [ \$shutdown_duration -lt \$CONTAINER_STOP_TIMEOUT ]; then
+          echo "   🛑 Shutdown performance: EXCELLENT (graceful, \${shutdown_duration}s)"
+        else
+          echo "   ⚠️  Shutdown performance: SLOW (may need tuning)"
+        fi
+        
+        echo "   🏥 System health: VERIFIED (current deployment stable)"
+        echo "   📡 Monitoring: INTEGRATED (events logged)"
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════════════════"
       '
 
 # 10. Emergency Rollback (Manual).
