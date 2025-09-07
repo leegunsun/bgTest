@@ -579,7 +579,7 @@ switch-traffic-to-inactive:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   when: manual
-  allow_failure: false
+  allow_failure: true
   script:
     - echo "🔄 ZERO-DOWNTIME TRAFFIC SWITCH - Manual approval granted"
     - |
