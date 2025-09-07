@@ -158,7 +158,7 @@ detect-active-environment:
         echo "$DEPLOY_TARGET" > ~/deploy_target.env
       '
 
-# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME)
+# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME).
 deploy-to-inactive-environment:
   stage: deploy-inactive-dev
   image: alpine:latest
