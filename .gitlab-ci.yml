@@ -668,58 +668,40 @@ verify-deployment:
           exit 1
         fi
       '
-
 # 9. Cleanup or Rollback (Manual)
 cleanup-or-rollback:
   stage: cleanup-dev
   image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]  # SSH 설정 및 branch rules 재사용
-  when: manual                        # 수동 실행
-  allow_failure: false                 # 실패 시 파이프라인 실패로 처리
+  <<: [*ssh_setup, *rules_dev_main]
+  when: manual
+  allow_failure: false
   variables:
-    ACTION: "rollback"  # description 제거
+    ACTION: "rollback"
   script:
-    - echo "Selected action: $ACTION"
+    - echo "Selected action - $ACTION"
     - |
       if [ "$ACTION" = "cleanup" ]; then
         echo "🔹 Executing cleanup procedure on $DEPLOY_SERVER_DEV..."
-        ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-          cd ~/bgTest/v5ToWindow
-          echo "🧹 Performing cleanup of previous deployment..."
-      
-          # 예: 이전 inactive 환경 컨테이너 정리
-          INACTIVE_ENV=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-          echo "Inactive environment to clean: $INACTIVE_ENV"
-      
-          docker-compose -f docker-compose.yml stop ${INACTIVE_ENV}-app || true
-          docker-compose -f docker-compose.yml rm -f ${INACTIVE_ENV}-app || true
-          docker system prune -f
-          echo "✅ Cleanup completed for $INACTIVE_ENV"
-        '
+        ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow && \
+          echo "🧹 Performing cleanup of previous deployment..." && \
+          INACTIVE_ENV=$(cat ~/deploy_target.env 2>/dev/null || echo "green") && \
+          echo "Inactive environment to clean: $INACTIVE_ENV" && \
+          docker-compose -f docker-compose.yml stop ${INACTIVE_ENV}-app || true && \
+          docker-compose -f docker-compose.yml rm -f ${INACTIVE_ENV}-app || true && \
+          docker system prune -f && \
+          echo "✅ Cleanup completed for $INACTIVE_ENV"'
       elif [ "$ACTION" = "rollback" ]; then
         echo "⚠️ Executing rollback procedure on $DEPLOY_SERVER_DEV..."
-        ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-          cd ~/bgTest/v5ToWindow
-          echo "⏪ Rolling back active environment..."
-      
-          # 예: 롤백 시 활성 환경과 이전 버전 확인
-          CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
-          PREV_VERSION=$(cat ~/previous_version.env 2>/dev/null || echo "unknown")
-      
-          echo "Current active: $CURRENT_ACTIVE"
-          echo "Rolling back to previous version: $PREV_VERSION"
-      
-          if [ "$CURRENT_ACTIVE" = "blue" ]; then
-            TARGET="blue"
-          else
-            TARGET="green"
-          fi
-      
-          # Docker Compose를 이용한 롤백
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${TARGET}-app
-          echo "✅ Rollback completed for $TARGET"
-        '
+        ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow && \
+          echo "⏪ Rolling back active environment..." && \
+          CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue") && \
+          PREV_VERSION=$(cat ~/previous_version.env 2>/dev/null || echo "unknown") && \
+          echo "Current active: $CURRENT_ACTIVE" && \
+          echo "Rolling back to previous version: $PREV_VERSION" && \
+          if [ "$CURRENT_ACTIVE" = "blue" ]; then TARGET="green"; else TARGET="blue"; fi && \
+          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${TARGET}-app && \
+          echo "✅ Rollback completed for $TARGET"'
       else
-        echo "❌ Invalid ACTION: $ACTION. Please set to 'cleanup' or 'rollback'."
+        echo "❌ Invalid ACTION: $ACTION. Please set to cleanup or rollback."
         exit 1
       fi
