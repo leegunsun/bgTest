@@ -669,7 +669,7 @@ verify-deployment:
         fi
       '
 
-# 9. Cleanup Previous Environment (Manual)
+# 9. Cleanup Previous Environment (Manual).
 cleanup-previous-environment:
   stage: cleanup-dev
   image: alpine:latest
