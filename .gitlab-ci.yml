@@ -678,47 +678,53 @@ cleanup-previous-environment:
   when: manual
   allow_failure: true
   script:
-    - echo "🧹 Cleaning up previous version containers..."
+    - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        
-        echo "🔍 Identifying containers to cleanup..."
-        
-        # Find stopped blue-app containers
-        STOPPED_BLUE=$(docker ps -a --filter "status=exited" --filter "name=blue-app" --format "{{.ID}} {{.Names}}" 2>/dev/null || true)
-        STOPPED_GREEN=$(docker ps -a --filter "status=exited" --filter "name=green-app" --format "{{.ID}} {{.Names}}" 2>/dev/null || true)
-        
-        # Remove stopped blue-app containers
-        if [ -n "$STOPPED_BLUE" ]; then
-          echo "🗑️ Removing stopped blue-app containers:"
-          echo "$STOPPED_BLUE"
-          docker ps -a --filter "status=exited" --filter "name=blue-app" -q | xargs -r docker rm
-          echo "✅ Stopped blue-app containers removed"
-        else
-          echo "ℹ️ No stopped blue-app containers found"
+
+        echo "🔍 Determine previous active environment..."
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        echo "Previous active: $PREVIOUS_ACTIVE"
+
+        # Safety check: If previous active equals deploy_target, then no-op
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        if [ "$PREVIOUS_ACTIVE" = "$DEPLOY_TARGET" ]; then
+          echo "ℹ️  PREVIOUS_ACTIVE equals DEPLOY_TARGET; nothing to cleanup."
+          exit 0
         fi
-        
-        # Remove stopped green-app containers
-        if [ -n "$STOPPED_GREEN" ]; then
-          echo "🗑️ Removing stopped green-app containers:"
-          echo "$STOPPED_GREEN"
-          docker ps -a --filter "status=exited" --filter "name=green-app" -q | xargs -r docker rm
-          echo "✅ Stopped green-app containers removed"
-        else
-          echo "ℹ️ No stopped green-app containers found"
+
+        APP_NAME="${PREVIOUS_ACTIVE}-app"
+        echo "🧹 Cleaning up previous app container: $APP_NAME"
+
+        # 1) Find running containers that match the name filter
+        RUNNING_IDS=$(docker ps --filter "name=$APP_NAME" -q || true)
+        if [ -n "$RUNNING_IDS" ]; then
+          echo "⏳ Attempting graceful stop of running containers:"
+          docker ps --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          # graceful stop with 30s timeout
+          docker stop --time=30 $RUNNING_IDS || {
+            echo "⚠️ Some containers failed to stop gracefully; attempting forced removal"
+          }
         fi
-        
-        # Remove dangling images from previous builds
-        echo "🔍 Removing dangling images..."
-        REMOVED_IMAGES=$(docker image prune -f --filter "dangling=true" 2>/dev/null || true)
-        if [ -n "$REMOVED_IMAGES" ]; then
-          echo "✅ Dangling images removed"
+
+        # 2) Remove any containers (running or exited) with this name
+        ALL_IDS=$(docker ps -a --filter "name=$APP_NAME" -q || true)
+        if [ -n "$ALL_IDS" ]; then
+          echo "🗑️ Removing containers (including volumes):"
+          docker ps -a --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          docker rm -v $ALL_IDS || {
+            echo "⚠️ docker rm failed - please inspect"
+          }
         else
-          echo "ℹ️ No dangling images found"
+          echo "ℹ️ No containers found to remove for $APP_NAME"
         fi
-        
-        echo "🎉 Container cleanup completed safely"
+
+        # 3) Prune dangling images
+        echo "🔍 Pruning dangling images..."
+        docker image prune -f --filter "dangling=true" || true
+
+        echo "🎉 Previous environment cleanup finished."
       '
 
 # 10. Emergency Rollback (Manual).
