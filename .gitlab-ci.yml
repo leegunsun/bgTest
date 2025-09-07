@@ -29,6 +29,10 @@ variables:
   BLUE_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
   GREEN_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
   DEPLOYMENT_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  
+  # Blue-Green Cleanup Configuration
+  CLEANUP_STRATEGY: "aggressive"    # Options: aggressive, balanced, conservative
+  KEEP_INACTIVE_MINUTES: "5"       # Minutes to keep inactive environment for rollback safety
 
 # Reusable rules
 .rules_dev_and_main: &rules_dev_main
@@ -678,10 +682,18 @@ cleanup-previous-environment:
   when: manual
   allow_failure: true
   timeout: 2h  # Extended timeout for comprehensive cleanup
+  variables:
+    CLEANUP_STRATEGY: "${CLEANUP_STRATEGY}"
+    KEEP_INACTIVE_MINUTES: "${KEEP_INACTIVE_MINUTES}"
   script:
     - echo "🧹 Starting comprehensive Blue-Green container cleanup..."
+    - echo "📊 Cleanup Configuration:"
+    - echo "   Strategy: ${CLEANUP_STRATEGY}"
+    - echo "   Inactive retention: ${KEEP_INACTIVE_MINUTES} minutes"
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        export CLEANUP_STRATEGY="'${CLEANUP_STRATEGY}'"
+        export KEEP_INACTIVE_MINUTES="'${KEEP_INACTIVE_MINUTES}'"
         cd ~/bgTest/v5ToWindow
         
         # Enhanced cleanup script with safety mechanisms
@@ -779,48 +791,155 @@ cleanup-previous-environment:
         echo "🔍 Current image inventory:"
         docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}" | grep -E "(blue|green|bgtest|v5towindow)" || echo "No project images found"
         
-        # Identify containers to cleanup
+        # Identify containers to cleanup with Blue-Green deployment awareness
         echo ""
-        echo "🎯 Identifying containers for cleanup:"
+        echo "🎯 Identifying containers for cleanup (Blue-Green Deployment Mode):"
         
-        # Get all project containers (excluding currently running active environment)
-        all_containers=$(docker ps -a --filter "label=com.docker.compose.project=bgtest" --format "{{.Names}}" 2>/dev/null || echo "")
+        # Determine cleanup strategy based on environment variables (default: aggressive)
+        CLEANUP_STRATEGY="${CLEANUP_STRATEGY:-aggressive}"
+        KEEP_INACTIVE_MINUTES="${KEEP_INACTIVE_MINUTES:-5}"  # Keep inactive for 5 minutes for rollback safety
+        
+        echo "📋 Cleanup Configuration:"
+        echo "   Strategy: $CLEANUP_STRATEGY"
+        echo "   Inactive retention: $KEEP_INACTIVE_MINUTES minutes"
+        echo "   Active environment: $CURRENT_ACTIVE"
+        
+        # Essential services that should never be removed
+        essential_services="nginx-proxy api-server"
+        
+        # Blue-Green environment containers
+        blue_container="blue-app"
+        green_container="green-app"
+        active_container="${CURRENT_ACTIVE}-app"
+        inactive_container=""
+        
+        if [ "$CURRENT_ACTIVE" = "blue" ]; then
+          inactive_container="green-app"
+        else
+          inactive_container="blue-app"
+        fi
+        
+        echo "🔍 Blue-Green Container Analysis:"
+        echo "   Active container: $active_container"
+        echo "   Inactive container: $inactive_container"
         
         cleanup_containers=""
-        keep_containers="nginx-proxy api-server $active_container"
         
-        for container in $all_containers; do
-          should_keep=false
-          for keep in $keep_containers; do
-            if [ "$container" = "$keep" ]; then
-              should_keep=true
-              break
-            fi
-          done
-          
-          if [ "$should_keep" = "false" ]; then
-            # Additional check: Do not remove if container was created very recently (last 30 minutes)
-            container_age=$(docker inspect "$container" --format "{{.Created}}" 2>/dev/null || echo "")
-            if [ -n "$container_age" ]; then
-              # Simple time-based check - if created in last 30 minutes, keep it
-              current_time=$(date +%s)
-              container_time=$(date -d "$container_age" +%s 2>/dev/null || echo "0")
-              time_diff=$((current_time - container_time))
-              
-              if [ $time_diff -lt 1800 ]; then  # 30 minutes = 1800 seconds
-                echo "⏰ Keeping recently created container: $container (created $((time_diff/60)) minutes ago)"
+        # Check if containers exist and their status
+        blue_exists=$(docker ps -a --format "{{.Names}}" | grep -c "^blue-app$" || echo "0")
+        green_exists=$(docker ps -a --format "{{.Names}}" | grep -c "^green-app$" || echo "0")
+        
+        echo "📊 Container Existence Check:"
+        echo "   blue-app exists: $(if [ "$blue_exists" = "1" ]; then echo "Yes"; else echo "No"; fi)"
+        echo "   green-app exists: $(if [ "$green_exists" = "1" ]; then echo "Yes"; else echo "No"; fi)"
+        
+        # Blue-Green Cleanup Logic
+        case "$CLEANUP_STRATEGY" in
+          "aggressive")
+            # Immediately remove inactive environment (resource-optimized for AWS t2.micro)
+            echo "🚀 Aggressive cleanup mode: Removing inactive environment immediately"
+            
+            if [ "$inactive_container" != "$active_container" ]; then
+              if docker ps -a --format "{{.Names}}" | grep -q "^${inactive_container}$"; then
+                # Check if inactive container has been running longer than safety window
+                container_age=$(docker inspect "$inactive_container" --format "{{.Created}}" 2>/dev/null || echo "")
+                if [ -n "$container_age" ]; then
+                  current_time=$(date +%s)
+                  container_time=$(date -d "$container_age" +%s 2>/dev/null || echo "0")
+                  time_diff_minutes=$(((current_time - container_time) / 60))
+                  
+                  if [ $time_diff_minutes -gt $KEEP_INACTIVE_MINUTES ]; then
+                    cleanup_containers="$cleanup_containers $inactive_container"
+                    echo "🗑️  Marking inactive environment for cleanup: $inactive_container (inactive for $time_diff_minutes minutes)"
+                  else
+                    echo "⏰ Keeping inactive container for rollback safety: $inactive_container (inactive for $time_diff_minutes minutes, threshold: $KEEP_INACTIVE_MINUTES min)"
+                  fi
+                else
+                  cleanup_containers="$cleanup_containers $inactive_container"
+                  echo "🗑️  Marking inactive environment for cleanup: $inactive_container (age unknown)"
+                fi
               else
-                cleanup_containers="$cleanup_containers $container"
-                echo "🗑️  Marking for cleanup: $container (created $((time_diff/3600)) hours ago)"
+                echo "ℹ️  Inactive container $inactive_container does not exist"
               fi
-            else
-              cleanup_containers="$cleanup_containers $container"
-              echo "🗑️  Marking for cleanup: $container (age unknown)"
             fi
-          else
-            echo "🔒 Keeping essential container: $container"
+            ;;
+            
+          "conservative")
+            # Keep both environments (original behavior with time-based cleanup)
+            echo "🛡️  Conservative cleanup mode: Time-based cleanup only"
+            
+            for container in blue-app green-app; do
+              if [ "$container" != "$active_container" ]; then
+                if docker ps -a --format "{{.Names}}" | grep -q "^${container}$"; then
+                  container_age=$(docker inspect "$container" --format "{{.Created}}" 2>/dev/null || echo "")
+                  if [ -n "$container_age" ]; then
+                    current_time=$(date +%s)
+                    container_time=$(date -d "$container_age" +%s 2>/dev/null || echo "0")
+                    time_diff_hours=$((time_diff / 3600))
+                    
+                    if [ $time_diff_hours -gt 24 ]; then  # Keep for 24 hours
+                      cleanup_containers="$cleanup_containers $container"
+                      echo "🗑️  Marking old container for cleanup: $container (created $time_diff_hours hours ago)"
+                    else
+                      echo "⏰ Keeping recent container: $container (created $time_diff_hours hours ago)"
+                    fi
+                  fi
+                fi
+              fi
+            done
+            ;;
+            
+          "balanced")
+            # Keep current + 1 previous for rollback, remove older versions
+            echo "⚖️  Balanced cleanup mode: Keep current + 1 previous version"
+            
+            # This would require version tracking - simplified to aggressive for now
+            if [ "$inactive_container" != "$active_container" ]; then
+              if docker ps -a --format "{{.Names}}" | grep -q "^${inactive_container}$"; then
+                container_age=$(docker inspect "$inactive_container" --format "{{.Created}}" 2>/dev/null || echo "")
+                if [ -n "$container_age" ]; then
+                  current_time=$(date +%s)
+                  container_time=$(date -d "$container_age" +%s 2>/dev/null || echo "0")
+                  time_diff_minutes=$(((current_time - container_time) / 60))
+                  
+                  if [ $time_diff_minutes -gt 30 ]; then  # Keep for 30 minutes for rollback
+                    cleanup_containers="$cleanup_containers $inactive_container"
+                    echo "🗑️  Marking previous version for cleanup: $inactive_container (inactive for $time_diff_minutes minutes)"
+                  else
+                    echo "⏰ Keeping previous version for rollback: $inactive_container (inactive for $time_diff_minutes minutes)"
+                  fi
+                fi
+              fi
+            fi
+            ;;
+        esac
+        
+        # Additional cleanup: Find any other old blue/green containers
+        echo "🔍 Scanning for additional outdated Blue-Green containers..."
+        other_containers=$(docker ps -a --format "{{.Names}}" | grep -E "^(blue|green).*app" | grep -v -E "^(blue-app|green-app)$" || echo "")
+        if [ -n "$other_containers" ]; then
+          for container in $other_containers; do
+            cleanup_containers="$cleanup_containers $container"
+            echo "🗑️  Found additional outdated container: $container"
+          done
+        fi
+        
+        # Protect essential services
+        for essential in $essential_services; do
+          if echo "$cleanup_containers" | grep -q "$essential"; then
+            cleanup_containers=$(echo "$cleanup_containers" | sed "s/$essential//g")
+            echo "🔒 Protected essential service: $essential"
           fi
         done
+        
+        # Final cleanup containers list
+        cleanup_containers=$(echo "$cleanup_containers" | tr ' ' '\n' | grep -v "^$" | tr '\n' ' ' | sed 's/ $//')
+        
+        if [ -n "$cleanup_containers" ]; then
+          echo "📋 Final cleanup target list:$cleanup_containers"
+        else
+          echo "ℹ️  No containers identified for cleanup based on current strategy ($CLEANUP_STRATEGY)"
+        fi
         
         # === PHASE 4: SAFE CONTAINER REMOVAL ===
         echo ""
