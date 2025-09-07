@@ -246,18 +246,23 @@ deploy-to-inactive-environment:
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
           
-          # TRUE ZERO-DOWNTIME DEPLOYMENT - NO CONTAINER STOP/KILL
+          # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
           
-          # Rebuild API server with latest fixes (network access issue resolution)
-          echo "🔧 Rebuilding API server with network access fixes..."
-          docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server
+          # Check if API server needs rebuild (only if unhealthy)
+          API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
+          if [ "$API_STATUS" != "healthy" ]; then
+            echo "🔧 API server unhealthy, rebuilding..."
+            docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
+            docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
+          else
+            echo "✅ API server healthy, skipping rebuild"
+          fi
           
-          # Rebuild target application environment
-          echo "🎯 Rebuilding $DEPLOY_TARGET application environment..."
+          # Rebuild ONLY target application environment (True Blue-Green)
+          echo "🎯 Rebuilding ONLY $DEPLOY_TARGET application environment..."
           docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
+          docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app
           
           echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
           sleep 45  # Extended wait time for API server + target environment startup
