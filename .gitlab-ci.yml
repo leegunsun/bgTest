@@ -677,9 +677,7 @@ cleanup-or-rollback:
   when: manual                        # 수동 실행
   allow_failure: false                 # 실패 시 파이프라인 실패로 처리
   variables:
-    ACTION:
-      value: "cleanup"
-      description: "Set to 'cleanup' or 'rollback' before running the job"
+    ACTION: "rollback"  # description 제거
   script:
     - echo "Selected action: $ACTION"
     - |
