@@ -681,7 +681,7 @@ cleanup-previous-environment:
   <<: [*ssh_setup, *rules_dev_main]
   needs: ["verify-deployment"]
   when: manual
-  allow_failure: false
+  allow_failure: true
   script:
     - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
     - |
@@ -738,7 +738,7 @@ emergency-rollback:
   image: alpine:latest
   <<: [*ssh_setup, *rules_dev_main]
   when: manual
-  allow_failure: false
+  allow_failure: true
   environment:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
