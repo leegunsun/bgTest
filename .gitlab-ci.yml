@@ -668,40 +668,99 @@ verify-deployment:
           exit 1
         fi
       '
-# 9. Cleanup or Rollback (Manual)
-cleanup-or-rollback:
+
+# 9. Cleanup Previous Environment (Manual).
+cleanup-previous-environment:
+  stage: cleanup-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["verify-deployment"]
+  when: manual
+  allow_failure: true
+  script:
+    - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+
+        echo "🔍 Determine previous active environment..."
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        echo "Previous active: $PREVIOUS_ACTIVE"
+
+        # Safety check: If previous active equals deploy_target, then no-op
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        if [ "$PREVIOUS_ACTIVE" = "$DEPLOY_TARGET" ]; then
+          echo "ℹ️  PREVIOUS_ACTIVE equals DEPLOY_TARGET; nothing to cleanup."
+          exit 0
+        fi
+
+        APP_NAME="${PREVIOUS_ACTIVE}-app"
+        echo "🧹 Cleaning up previous app container: $APP_NAME"
+
+        # 1) Find running containers that match the name filter
+        RUNNING_IDS=$(docker ps --filter "name=$APP_NAME" -q || true)
+        if [ -n "$RUNNING_IDS" ]; then
+          echo "⏳ Attempting graceful stop of running containers:"
+          docker ps --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          # graceful stop with 30s timeout
+          docker stop --time=30 $RUNNING_IDS || {
+            echo "⚠️ Some containers failed to stop gracefully; attempting forced removal"
+          }
+        fi
+
+        # 2) Remove any containers (running or exited) with this name
+        ALL_IDS=$(docker ps -a --filter "name=$APP_NAME" -q || true)
+        if [ -n "$ALL_IDS" ]; then
+          echo "🗑️ Removing containers (including volumes):"
+          docker ps -a --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          docker rm -v $ALL_IDS || {
+            echo "⚠️ docker rm failed - please inspect"
+          }
+        else
+          echo "ℹ️ No containers found to remove for $APP_NAME"
+        fi
+
+        # 3) Prune dangling images
+        echo "🔍 Pruning dangling images..."
+        docker image prune -f --filter "dangling=true" || true
+
+        echo "🎉 Previous environment cleanup finished."
+      '
+
+# 10. Emergency Rollback (Manual).
+emergency-rollback:
   stage: cleanup-dev
   image: alpine:latest
   <<: [*ssh_setup, *rules_dev_main]
   when: manual
-  allow_failure: false
-  variables:
-    ACTION: "rollback"
+  allow_failure: true
+  environment:
+    name: production-dev
+    url: "http://$DEPLOY_SERVER_DEV"
   script:
-    - echo "Selected action - $ACTION"
+    - echo "🚨 EMERGENCY ROLLBACK - Immediate traffic restoration"
     - |
-      if [ "$ACTION" = "cleanup" ]; then
-        echo "🔹 Executing cleanup procedure on $DEPLOY_SERVER_DEV..."
-        ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow && \
-          echo "🧹 Performing cleanup of previous deployment..." && \
-          INACTIVE_ENV=$(cat ~/deploy_target.env 2>/dev/null || echo "green") && \
-          echo "Inactive environment to clean: $INACTIVE_ENV" && \
-          docker-compose -f docker-compose.yml stop ${INACTIVE_ENV}-app || true && \
-          docker-compose -f docker-compose.yml rm -f ${INACTIVE_ENV}-app || true && \
-          docker system prune -f && \
-          echo "✅ Cleanup completed for $INACTIVE_ENV"'
-      elif [ "$ACTION" = "rollback" ]; then
-        echo "⚠️ Executing rollback procedure on $DEPLOY_SERVER_DEV..."
-        ssh "ubuntu@$DEPLOY_SERVER_DEV" 'cd ~/bgTest/v5ToWindow && \
-          echo "⏪ Rolling back active environment..." && \
-          CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue") && \
-          PREV_VERSION=$(cat ~/previous_version.env 2>/dev/null || echo "unknown") && \
-          echo "Current active: $CURRENT_ACTIVE" && \
-          echo "Rolling back to previous version: $PREV_VERSION" && \
-          if [ "$CURRENT_ACTIVE" = "blue" ]; then TARGET="green"; else TARGET="blue"; fi && \
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${TARGET}-app && \
-          echo "✅ Rollback completed for $TARGET"'
-      else
-        echo "❌ Invalid ACTION: $ACTION. Please set to cleanup or rollback."
-        exit 1
-      fi
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        
+        echo "🔄 Emergency rollback to $PREVIOUS_ACTIVE environment..."
+        
+        # Execute rollback via API - using Docker internal network
+        rollback_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+          curl -s -X POST "http://api-server:9000/switch/$PREVIOUS_ACTIVE" 2>/dev/null || echo "{\"success\":false}")
+        
+        if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
+          echo "✅ Emergency rollback successful - traffic restored to $PREVIOUS_ACTIVE"
+        else
+          echo "❌ Emergency rollback failed - manual intervention required"
+          exit 1
+        fi
+        
+        # Verify rollback
+        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
+          echo "✅ Rollback verification successful"
+        else
+          echo "❌ Rollback verification failed"
+        fi
+      '
