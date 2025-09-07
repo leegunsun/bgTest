@@ -678,16 +678,47 @@ cleanup-previous-environment:
   when: manual
   allow_failure: true
   script:
-    - echo "🧹 Cleaning up previous environment..."
+    - echo "🧹 Cleaning up previous version containers..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
         
-        echo "🗑️  Optionally scaling down previous $CURRENT_ACTIVE environment..."
-        echo "   (Both environments remain available for instant rollback)"
-        echo "   Previous environment: $CURRENT_ACTIVE"
-        echo "   Cleanup completed"
+        echo "🔍 Identifying containers to cleanup..."
+        
+        # Find stopped blue-app containers
+        STOPPED_BLUE=$(docker ps -a --filter "status=exited" --filter "name=blue-app" --format "{{.ID}} {{.Names}}" 2>/dev/null || true)
+        STOPPED_GREEN=$(docker ps -a --filter "status=exited" --filter "name=green-app" --format "{{.ID}} {{.Names}}" 2>/dev/null || true)
+        
+        # Remove stopped blue-app containers
+        if [ -n "$STOPPED_BLUE" ]; then
+          echo "🗑️ Removing stopped blue-app containers:"
+          echo "$STOPPED_BLUE"
+          docker ps -a --filter "status=exited" --filter "name=blue-app" -q | xargs -r docker rm
+          echo "✅ Stopped blue-app containers removed"
+        else
+          echo "ℹ️ No stopped blue-app containers found"
+        fi
+        
+        # Remove stopped green-app containers
+        if [ -n "$STOPPED_GREEN" ]; then
+          echo "🗑️ Removing stopped green-app containers:"
+          echo "$STOPPED_GREEN"
+          docker ps -a --filter "status=exited" --filter "name=green-app" -q | xargs -r docker rm
+          echo "✅ Stopped green-app containers removed"
+        else
+          echo "ℹ️ No stopped green-app containers found"
+        fi
+        
+        # Remove dangling images from previous builds
+        echo "🔍 Removing dangling images..."
+        REMOVED_IMAGES=$(docker image prune -f --filter "dangling=true" 2>/dev/null || true)
+        if [ -n "$REMOVED_IMAGES" ]; then
+          echo "✅ Dangling images removed"
+        else
+          echo "ℹ️ No dangling images found"
+        fi
+        
+        echo "🎉 Container cleanup completed safely"
       '
 
 # 10. Emergency Rollback (Manual).
