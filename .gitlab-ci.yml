@@ -579,7 +579,7 @@ switch-traffic-to-inactive:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   when: manual
-  allow_failure: true
+  allow_failure: false
   script:
     - echo "🔄 ZERO-DOWNTIME TRAFFIC SWITCH - Manual approval granted"
     - |
@@ -676,7 +676,7 @@ cleanup-previous-environment:
   <<: [*ssh_setup, *rules_dev_main]
   needs: ["verify-deployment"]
   when: manual
-  allow_failure: true
+  allow_failure: false
   script:
     - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
     - |
@@ -733,7 +733,7 @@ emergency-rollback:
   image: alpine:latest
   <<: [*ssh_setup, *rules_dev_main]
   when: manual
-  allow_failure: true
+  allow_failure: false
   environment:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
