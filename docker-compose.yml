@@ -9,8 +9,10 @@ services:
     hostname: nginx-proxy
     ports:
       - "80:80"        # Main proxy (only port exposed to EC2)
-    # NOTE: depends_on removed to prevent cascading restarts
-    # Services are connected via network, not dependency chain
+    depends_on:
+      - blue-app
+      - green-app
+      - api-server
     volumes:
       # NGINX main configuration
       - ./nginx.conf:/etc/nginx/nginx.conf:ro

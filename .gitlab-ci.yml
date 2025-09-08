@@ -18,7 +18,6 @@ stages:
   - switch-traffic-dev
   - verify-deployment-dev
   - cleanup-dev
-  - api-management-dev
 
 # Common variables
 variables:
@@ -115,17 +114,7 @@ detect-active-environment:
         # Enhanced environment detection with API fallback
         echo "🔍 Detecting current environment with multiple methods..."
         
-        # Robust system detection with sudo fallback
-        SYSTEM_RUNNING=false
-        if docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
-          SYSTEM_RUNNING=true
-        elif sudo docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
-          SYSTEM_RUNNING=true
-        elif docker ps 2>/dev/null | grep -q nginx-proxy || sudo docker ps 2>/dev/null | grep -q nginx-proxy; then
-          SYSTEM_RUNNING=true
-        fi
-        
-        if [ "$SYSTEM_RUNNING" = "true" ]; then
+        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ Blue-Green system is running"
           
           # Try API-based detection first (more reliable) - using Docker internal network
@@ -254,52 +243,27 @@ deploy-to-inactive-environment:
           exit 1
         fi
         
-        # Check if system is already running (with robust detection)
-        echo "🔍 Checking if system is already running..."
-        SYSTEM_RUNNING=false
-        
-        # Try docker first, then sudo docker
-        if docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
-          SYSTEM_RUNNING=true
-          echo "   ✓ nginx-proxy detected (docker)"
-        elif sudo docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
-          SYSTEM_RUNNING=true
-          echo "   ✓ nginx-proxy detected (sudo docker)"
-        else
-          # Double-check with a simpler command
-          if docker ps 2>/dev/null | grep -q nginx-proxy || sudo docker ps 2>/dev/null | grep -q nginx-proxy; then
-            SYSTEM_RUNNING=true
-            echo "   ✓ nginx-proxy detected (fallback method)"
-          fi
-        fi
-        
-        if [ "$SYSTEM_RUNNING" = "true" ]; then
+        # Check if system is already running
+        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
           
           # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
           
-          # Check API server health but DO NOT rebuild during zero-downtime deployment
+          # Check if API server needs rebuild (only if unhealthy)
           API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
           if [ "$API_STATUS" != "healthy" ]; then
-            echo "⚠️ API server unhealthy, but preserving for zero-downtime deployment"
-            echo "   API server status: $API_STATUS"
-            echo "   Note: API server issues should be handled separately, not during app deployment"
+            echo "🔧 API server unhealthy, rebuilding..."
+            docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
+            docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
           else
-            echo "✅ API server healthy, continuing with deployment"
+            echo "✅ API server healthy, skipping rebuild"
           fi
           
           # Rebuild ONLY target application environment (True Blue-Green)
           echo "🎯 Rebuilding ONLY $DEPLOY_TARGET application environment..."
           docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          
-          # Use --no-recreate for other containers, force recreate only for target
-          echo "🔄 Starting $DEPLOY_TARGET with zero-downtime guarantee..."
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
-          
-          # Ensure other services remain untouched
-          echo "✓ Ensuring other services remain stable..."
-          docker-compose -f docker-compose.yml up -d --no-recreate --no-deps nginx-proxy api-server || sudo docker-compose -f docker-compose.yml up -d --no-recreate --no-deps nginx-proxy api-server
+          docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app
           
           echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
           sleep 45  # Extended wait time for API server + target environment startup
@@ -325,76 +289,20 @@ deploy-to-inactive-environment:
           done
           
         else
-          echo "⚠️  System appears not running - verifying before full deployment..."
+          echo "🏗️  Initial system deployment - starting all services"
           
-          # SAFETY CHECK: Verify containers are truly not running before full restart
-          EXISTING_CONTAINERS=$(docker ps -a --filter "name=nginx-proxy\|blue-app\|green-app\|api-server" --format "{{.Names}}" 2>/dev/null || sudo docker ps -a --filter "name=nginx-proxy\|blue-app\|green-app\|api-server" --format "{{.Names}}" 2>/dev/null || echo "")
-          
-          if [ -n "$EXISTING_CONTAINERS" ]; then
-            echo "🚨 WARNING: Found existing containers: $EXISTING_CONTAINERS"
-            echo "🔍 Checking container states..."
-            
-            # Check if any container has been running for more than 5 minutes
-            LONG_RUNNING=false
-            for container in $EXISTING_CONTAINERS; do
-              UPTIME=$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || sudo docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || echo "")
-              if [ -n "$UPTIME" ]; then
-                # Check if container has been up for more than 5 minutes
-                STARTED_TS=$(date -d "$UPTIME" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${UPTIME%%.*}" +%s 2>/dev/null || echo "0")
-                CURRENT_TS=$(date +%s)
-                AGE=$((CURRENT_TS - STARTED_TS))
-                
-                if [ $AGE -gt 300 ]; then
-                  LONG_RUNNING=true
-                  echo "   ⚠️ $container has been running for $((AGE/60)) minutes"
-                fi
-              fi
-            done
-            
-            if [ "$LONG_RUNNING" = "true" ]; then
-              echo "❌ SAFETY: Refusing to restart long-running containers!"
-              echo "🔧 Attempting targeted deployment instead..."
-              
-              # Force deployment to inactive environment only
-              CURRENT_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env 2>/dev/null | grep -o "blue\|green" || sudo docker exec nginx-proxy cat /etc/nginx/conf.d/active.env 2>/dev/null | grep -o "blue\|green" || echo "blue")
-              if [ "$CURRENT_ACTIVE" = "blue" ]; then
-                DEPLOY_TARGET="green"
-              else
-                DEPLOY_TARGET="blue"
-              fi
-              
-              echo "🎯 Safety override: Deploying to $DEPLOY_TARGET only"
-              docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-              docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
-              
-              # Ensure other containers remain stable
-              docker-compose -f docker-compose.yml up -d --no-recreate --no-deps nginx-proxy api-server || sudo docker-compose -f docker-compose.yml up -d --no-recreate --no-deps nginx-proxy api-server
-              
-              echo "⏳ Waiting for $DEPLOY_TARGET to be ready..."
-              sleep 45
-              
-              # Skip the rest of the initial deployment
-              SKIP_INITIAL=true
-            fi
+          # Initialize active.env for first deployment (True Blue-Green setup)
+          if [ ! -f "conf.d/active.env" ]; then
+            echo "🔧 Initializing active.env for first deployment..."
+            echo "set \$active \"green\";" > conf.d/active.env
+            echo "✅ Created initial active.env with green environment"
+          else
+            echo "ℹ️  active.env already exists, preserving current configuration"
           fi
           
-          # Only do full deployment if truly initial or no long-running containers
-          if [ "${SKIP_INITIAL:-false}" != "true" ]; then
-            echo "🏗️  Initial system deployment - starting all services"
-            
-            # Initialize active.env for first deployment (True Blue-Green setup)
-            if [ ! -f "conf.d/active.env" ]; then
-              echo "🔧 Initializing active.env for first deployment..."
-              echo "set \$active \"green\";" > conf.d/active.env
-              echo "✅ Created initial active.env with green environment"
-            else
-              echo "ℹ️  active.env already exists, preserving current configuration"
-            fi
-            
-            docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
-            docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
-            docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
-          fi
+          docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
+          docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
+          docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
           
           echo "⏳ Waiting for all services to be ready (t2.micro needs more time)..."
           sleep 120
@@ -861,53 +769,4 @@ emergency-rollback:
         else
           echo "❌ Rollback verification failed"
         fi
-      '
-
-# 11. API Server Management (Separate from deployment)
-api-server-management:
-  stage: api-management-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  when: manual
-  allow_failure: true
-  script:
-    - echo "🔧 API Server Management - Independent from Blue-Green deployment"
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        
-        echo "📊 API Server Health Check..."
-        API_STATUS=$(docker inspect --format="{{.State.Health.Status}}" api-server 2>/dev/null || echo "not-found")
-        
-        if [ "$API_STATUS" = "healthy" ]; then
-          echo "✅ API server is healthy - no action needed"
-          exit 0
-        fi
-        
-        echo "⚠️ API server status: $API_STATUS"
-        echo "🔄 Rebuilding API server independently..."
-        
-        # Rebuild API server without affecting Blue-Green environments
-        docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
-        docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
-        
-        # Wait for API server to be ready
-        echo "⏳ Waiting for API server to become healthy..."
-        for attempt in $(seq 1 20); do
-          API_STATUS=$(docker inspect --format="{{.State.Health.Status}}" api-server 2>/dev/null || echo "unhealthy")
-          if [ "$API_STATUS" = "healthy" ]; then
-            echo "✅ API server is now healthy"
-            break
-          fi
-          echo "   Attempt $attempt/20: API server status = $API_STATUS"
-          sleep 5
-        done
-        
-        if [ "$API_STATUS" != "healthy" ]; then
-          echo "❌ API server failed to become healthy after rebuild"
-          docker logs --tail 50 api-server
-          exit 1
-        fi
-        
-        echo "🎉 API server management completed successfully"
       '
