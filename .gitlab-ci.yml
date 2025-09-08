@@ -4,8 +4,9 @@
 
 default:
   tags:
-        - mac-mini
+#        - mac-mini
 #    - home-runner
+    - notebook
 
 stages:
   - build-dev
