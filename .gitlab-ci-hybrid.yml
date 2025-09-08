@@ -1,0 +1,562 @@
+# GitLab CI/CD + AWS CodeDeploy Hybrid Pipeline
+# Migrates from single EC2 Docker to dual EC2 + AWS ALB architecture
+# Version: 2.0 - Enhanced for ALB integration
+
+stages:
+  - build
+  - test
+  - package
+  - deploy-staging    # GitLab direct deployment (compatibility)
+  - deploy-production # CodeDeploy integration (new approach)
+  - switch-traffic    # ALB traffic switching
+  - validate
+  - rollback
+
+variables:
+  # Deployment strategy control
+  DEPLOYMENT_STRATEGY: "hybrid"  # hybrid | codedeploy-only | gitlab-only
+  
+  # Application configuration
+  APPLICATION_NAME: "bluegreen-app"
+  APPLICATION_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  
+  # AWS Configuration
+  AWS_DEFAULT_REGION: "us-east-1"
+  CODEDEPLOY_APPLICATION_NAME: "bluegreen-deployment-production-app"
+  CODEDEPLOY_S3_BUCKET: "bluegreen-codedeploy-artifacts"
+  
+  # Target Group Configuration
+  BLUE_TARGET_GROUP: "bluegreen-deployment-production-blue-tg"
+  GREEN_TARGET_GROUP: "bluegreen-deployment-production-green-tg"
+  ALB_LISTENER_ARN: "${ALB_LISTENER_ARN}"
+  
+  # Environment versions
+  BLUE_VERSION: "${BLUE_VERSION:-1.0.0}"
+  GREEN_VERSION: "${GREEN_VERSION:-1.0.0}"
+  DEPLOYMENT_VERSION: "${APPLICATION_VERSION}"
+  
+  # Docker configuration (for backwards compatibility)
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+
+# Build stage - Universal for all deployment strategies
+build:
+  stage: build
+  image: node:18-alpine
+  cache:
+    paths:
+      - node_modules/
+  script:
+    - echo "Building application version ${APPLICATION_VERSION}..."
+    - |
+      # Create package.json if it doesn't exist
+      if [ ! -f "package.json" ]; then
+        cat > package.json << 'EOF'
+      {
+        "name": "bluegreen-app",
+        "version": "1.0.0",
+        "description": "Blue-Green Deployment Application",
+        "main": "app-server/app.js",
+        "scripts": {
+          "start": "node app-server/app.js",
+          "pm2": "pm2 start ecosystem.config.js",
+          "health": "curl http://localhost:3001/health/deep"
+        },
+        "dependencies": {},
+        "engines": {
+          "node": ">=16.0.0"
+        }
+      }
+      EOF
+      fi
+    - npm ci --only=production
+    - echo "Build completed successfully"
+  artifacts:
+    paths:
+      - node_modules/
+      - app-server/
+      - ecosystem.config.js
+      - nginx-alb.conf
+      - conf.d/
+      - scripts/
+      - appspec.yml
+    expire_in: 1 hour
+
+# Test stage - Syntax and basic validation
+test:
+  stage: test
+  image: node:18-alpine
+  dependencies:
+    - build
+  script:
+    - echo "Running tests and validation..."
+    - |
+      # Test Node.js syntax
+      node -c app-server/app.js
+      
+      # Test ecosystem configuration syntax
+      node -e "require('./ecosystem.config.js'); console.log('✅ Ecosystem config is valid')"
+      
+      # Test appspec.yml syntax
+      if command -v python3 &> /dev/null; then
+        python3 -c "import yaml; yaml.safe_load(open('appspec.yml')); print('✅ AppSpec YAML is valid')"
+      fi
+      
+      echo "All tests passed"
+
+# Package stage - Create deployment artifacts
+package:
+  stage: package
+  image: alpine:latest
+  dependencies:
+    - build
+  before_script:
+    - apk add --no-cache zip aws-cli
+  script:
+    - echo "Creating deployment package..."
+    - |
+      # Create deployment metadata
+      cat > deployment-metadata.json << EOF
+      {
+        "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "commit_hash": "${CI_COMMIT_SHA}",
+        "commit_short_sha": "${CI_COMMIT_SHORT_SHA}",
+        "branch": "${CI_COMMIT_REF_NAME}",
+        "pipeline_id": "${CI_PIPELINE_ID}",
+        "job_id": "${CI_JOB_ID}",
+        "version": "${APPLICATION_VERSION}",
+        "deployment_strategy": "${DEPLOYMENT_STRATEGY}"
+      }
+      EOF
+      
+      # Create CodeDeploy deployment package
+      zip -r "deployment-${APPLICATION_VERSION}.zip" \
+        app-server/ \
+        ecosystem.config.js \
+        nginx-alb.conf \
+        conf.d/ \
+        scripts/ \
+        appspec.yml \
+        deployment-metadata.json \
+        -x "*.git*" "*.DS_Store" "node_modules/.*"
+      
+      echo "Package created: deployment-${APPLICATION_VERSION}.zip"
+      ls -la *.zip
+  artifacts:
+    paths:
+      - "deployment-*.zip"
+      - deployment-metadata.json
+    expire_in: 1 day
+
+# Staging deployment - GitLab direct (backwards compatibility)
+deploy-to-staging:
+  stage: deploy-staging
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: staging
+  before_script:
+    - apk add --no-cache openssh-client curl
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H "$STAGING_SERVER" >> ~/.ssh/known_hosts
+  script:
+    - echo "Deploying to staging environment using GitLab method..."
+    - |
+      if [ "$DEPLOYMENT_STRATEGY" != "codedeploy-only" ]; then
+        echo "Using traditional GitLab deployment for staging"
+        
+        # Deploy to staging server
+        scp "deployment-${APPLICATION_VERSION}.zip" ec2-user@${STAGING_SERVER}:/tmp/
+        
+        ssh ec2-user@${STAGING_SERVER} << 'ENDSSH'
+          set -e
+          
+          # Extract deployment package
+          cd /opt/bluegreen-app-staging
+          unzip -o /tmp/deployment-*.zip
+          
+          # Update PM2 processes
+          ./scripts/manage-pm2.sh restart --env staging --group blue
+          
+          # Wait for health check
+          sleep 10
+          ./scripts/manage-pm2.sh health
+          
+          echo "Staging deployment completed"
+ENDSSH
+        
+        echo "Staging deployment completed successfully"
+      else
+        echo "CodeDeploy-only mode: skipping GitLab staging deployment"
+      fi
+  environment:
+    name: staging
+    url: http://${STAGING_SERVER}
+  when: manual
+  only:
+    - develop
+    - feature/*
+
+# Production deployment - Blue environment via CodeDeploy
+deploy-to-blue-production:
+  stage: deploy-production
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: production
+    DEPLOYMENT_GROUP: blue
+    TARGET_GROUP: "${BLUE_TARGET_GROUP}"
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+    - aws --version
+  script:
+    - echo "Deploying to Blue production environment via CodeDeploy..."
+    - |
+      # Upload deployment package to S3
+      S3_KEY="production/deployment-${APPLICATION_VERSION}-${CI_PIPELINE_ID}.zip"
+      aws s3 cp "deployment-${APPLICATION_VERSION}.zip" "s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      echo "Package uploaded to S3: s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      
+      # Create CodeDeploy deployment
+      DEPLOYMENT_ID=$(aws deploy create-deployment \
+        --application-name "${CODEDEPLOY_APPLICATION_NAME}" \
+        --deployment-group-name "${CODEDEPLOY_APPLICATION_NAME}-blue-dg" \
+        --s3-location bucket="${CODEDEPLOY_S3_BUCKET}",key="${S3_KEY}",bundleType=zip \
+        --description "GitLab Pipeline: ${CI_PIPELINE_ID}, Commit: ${CI_COMMIT_SHORT_SHA}" \
+        --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
+        --query 'deploymentId' \
+        --output text)
+      
+      echo "CodeDeploy deployment created: $DEPLOYMENT_ID"
+      echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" > codedeploy_deployment.env
+      
+      # Wait for deployment to complete
+      echo "Waiting for deployment to complete..."
+      aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+      
+      # Check deployment status
+      STATUS=$(aws deploy get-deployment \
+        --deployment-id "$DEPLOYMENT_ID" \
+        --query 'deploymentInfo.status' \
+        --output text)
+      
+      if [ "$STATUS" = "Succeeded" ]; then
+        echo "✅ Blue production deployment completed successfully"
+        
+        # Get deployment summary
+        aws deploy get-deployment \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --query 'deploymentInfo' \
+          --output table
+          
+      else
+        echo "❌ Blue production deployment failed with status: $STATUS"
+        
+        # Get failure details
+        aws deploy list-deployment-instances \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --query 'instancesList[?status==`Failed`]' \
+          --output table
+        exit 1
+      fi
+  artifacts:
+    reports:
+      dotenv: codedeploy_deployment.env
+    paths:
+      - codedeploy_deployment.env
+    expire_in: 1 day
+  environment:
+    name: production-blue
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Production deployment - Green environment via CodeDeploy
+deploy-to-green-production:
+  stage: deploy-production
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: production
+    DEPLOYMENT_GROUP: green
+    TARGET_GROUP: "${GREEN_TARGET_GROUP}"
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "Deploying to Green production environment via CodeDeploy..."
+    - |
+      # Upload deployment package to S3
+      S3_KEY="production/deployment-green-${APPLICATION_VERSION}-${CI_PIPELINE_ID}.zip"
+      aws s3 cp "deployment-${APPLICATION_VERSION}.zip" "s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      
+      # Create CodeDeploy deployment
+      DEPLOYMENT_ID=$(aws deploy create-deployment \
+        --application-name "${CODEDEPLOY_APPLICATION_NAME}" \
+        --deployment-group-name "${CODEDEPLOY_APPLICATION_NAME}-green-dg" \
+        --s3-location bucket="${CODEDEPLOY_S3_BUCKET}",key="${S3_KEY}",bundleType=zip \
+        --description "Green Deploy - Pipeline: ${CI_PIPELINE_ID}, Commit: ${CI_COMMIT_SHORT_SHA}" \
+        --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
+        --query 'deploymentId' \
+        --output text)
+      
+      echo "Green deployment created: $DEPLOYMENT_ID"
+      echo "GREEN_DEPLOYMENT_ID=$DEPLOYMENT_ID" > green_deployment.env
+      
+      # Wait for deployment
+      aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+      
+      # Validate deployment
+      STATUS=$(aws deploy get-deployment \
+        --deployment-id "$DEPLOYMENT_ID" \
+        --query 'deploymentInfo.status' \
+        --output text)
+      
+      if [ "$STATUS" = "Succeeded" ]; then
+        echo "✅ Green production deployment completed successfully"
+      else
+        echo "❌ Green deployment failed"
+        exit 1
+      fi
+  artifacts:
+    reports:
+      dotenv: green_deployment.env
+  environment:
+    name: production-green
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Traffic switching - ALB target group management
+switch-traffic-to-blue:
+  stage: switch-traffic
+  image: alpine:latest
+  dependencies:
+    - deploy-to-blue-production
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "Switching traffic to Blue environment..."
+    - |
+      # Get Blue target group ARN
+      BLUE_TG_ARN=$(aws elbv2 describe-target-groups \
+        --names "${BLUE_TARGET_GROUP}" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text)
+      
+      # Check target group health
+      HEALTHY_TARGETS=$(aws elbv2 describe-target-health \
+        --target-group-arn "$BLUE_TG_ARN" \
+        --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+        --output text)
+      
+      if [ "$HEALTHY_TARGETS" -lt 1 ]; then
+        echo "❌ No healthy targets in Blue target group"
+        exit 1
+      fi
+      
+      echo "✅ Found $HEALTHY_TARGETS healthy targets in Blue target group"
+      
+      # Switch ALB listener to Blue target group
+      aws elbv2 modify-listener \
+        --listener-arn "${ALB_LISTENER_ARN}" \
+        --default-actions Type=forward,TargetGroupArn="$BLUE_TG_ARN"
+      
+      echo "✅ Traffic switched to Blue environment"
+      
+      # Verify switch
+      sleep 5
+      CURRENT_TG=$(aws elbv2 describe-listeners \
+        --listener-arns "${ALB_LISTENER_ARN}" \
+        --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
+        --output text)
+      
+      if [ "$CURRENT_TG" = "$BLUE_TG_ARN" ]; then
+        echo "✅ Traffic switch verified"
+      else
+        echo "❌ Traffic switch verification failed"
+        exit 1
+      fi
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+switch-traffic-to-green:
+  stage: switch-traffic
+  image: alpine:latest
+  dependencies:
+    - deploy-to-green-production
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "Switching traffic to Green environment..."
+    - |
+      # Get Green target group ARN
+      GREEN_TG_ARN=$(aws elbv2 describe-target-groups \
+        --names "${GREEN_TARGET_GROUP}" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text)
+      
+      # Check target group health
+      HEALTHY_TARGETS=$(aws elbv2 describe-target-health \
+        --target-group-arn "$GREEN_TG_ARN" \
+        --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+        --output text)
+      
+      if [ "$HEALTHY_TARGETS" -lt 1 ]; then
+        echo "❌ No healthy targets in Green target group"
+        exit 1
+      fi
+      
+      # Switch traffic
+      aws elbv2 modify-listener \
+        --listener-arn "${ALB_LISTENER_ARN}" \
+        --default-actions Type=forward,TargetGroupArn="$GREEN_TG_ARN"
+      
+      echo "✅ Traffic switched to Green environment"
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Validation stage - Comprehensive deployment validation
+validate-deployment:
+  stage: validate
+  image: alpine:latest
+  dependencies:
+    - switch-traffic-to-blue
+    - switch-traffic-to-green
+  rules:
+    - if: '$CI_JOB_STAGE == "switch-traffic" && $CI_JOB_STATUS == "success"'
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "Validating deployment..."
+    - |
+      # Wait for ALB to propagate changes
+      sleep 30
+      
+      # Test ALB health endpoint
+      for i in {1..5}; do
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS_NAME}/health/deep" || echo "000")
+        
+        if [ "$HTTP_STATUS" = "200" ]; then
+          echo "✅ ALB health check passed (attempt $i)"
+          break
+        else
+          echo "❌ ALB health check failed: HTTP $HTTP_STATUS (attempt $i/5)"
+          if [ "$i" -eq 5 ]; then
+            exit 1
+          fi
+          sleep 10
+        fi
+      done
+      
+      # Test application content
+      RESPONSE=$(curl -s "http://${ALB_DNS_NAME}/" || echo "ERROR")
+      if echo "$RESPONSE" | grep -q "True Blue-Green Deployment"; then
+        echo "✅ Application content validation passed"
+      else
+        echo "❌ Application content validation failed"
+        exit 1
+      fi
+      
+      echo "✅ Deployment validation completed successfully"
+
+# Rollback stage - Emergency rollback capability
+emergency-rollback:
+  stage: rollback
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache aws-cli
+  script:
+    - echo "Performing emergency rollback..."
+    - |
+      if [ -n "$DEPLOYMENT_ID" ]; then
+        echo "Rolling back CodeDeploy deployment: $DEPLOYMENT_ID"
+        aws deploy stop-deployment \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --auto-rollback-enabled
+          
+        echo "Rollback initiated"
+      else
+        echo "No deployment ID found for rollback"
+        exit 1
+      fi
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Utility jobs for monitoring and management
+show-infrastructure-status:
+  stage: validate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "=== Infrastructure Status ==="
+    - |
+      # Show ALB status
+      echo "ALB Status:"
+      aws elbv2 describe-load-balancers \
+        --names "bluegreen-deployment-production-alb" \
+        --query 'LoadBalancers[0].{DNSName:DNSName,State:State.Code}' \
+        --output table || echo "ALB not found"
+      
+      # Show target group health
+      echo "Blue Target Group Health:"
+      aws elbv2 describe-target-health \
+        --target-group-arn $(aws elbv2 describe-target-groups --names "${BLUE_TARGET_GROUP}" --query 'TargetGroups[0].TargetGroupArn' --output text) \
+        --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State,Description:TargetHealth.Description}' \
+        --output table || echo "Blue TG not found"
+      
+      echo "Green Target Group Health:"
+      aws elbv2 describe-target-health \
+        --target-group-arn $(aws elbv2 describe-target-groups --names "${GREEN_TARGET_GROUP}" --query 'TargetGroups[0].TargetGroupArn' --output text) \
+        --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State,Description:TargetHealth.Description}' \
+        --output table || echo "Green TG not found"
+  when: manual
+  only:
+    - main
+
+# Cleanup old artifacts
+cleanup-s3-artifacts:
+  stage: validate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache aws-cli
+  script:
+    - echo "Cleaning up old S3 artifacts..."
+    - |
+      # Keep only last 10 deployment packages
+      aws s3api list-objects-v2 \
+        --bucket "${CODEDEPLOY_S3_BUCKET}" \
+        --prefix "production/" \
+        --query 'sort_by(Contents, &LastModified)[:-10].[Key]' \
+        --output text | \
+      while read -r key; do
+        if [ -n "$key" ]; then
+          aws s3 rm "s3://${CODEDEPLOY_S3_BUCKET}/$key"
+          echo "Deleted: $key"
+        fi
+      done
+      
+      echo "S3 cleanup completed"
+  when: manual
+  only:
+    - main

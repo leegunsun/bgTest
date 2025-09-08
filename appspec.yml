@@ -1,0 +1,82 @@
+# AWS CodeDeploy Application Specification
+# Blue-Green Deployment with ALB Integration
+# Version: 2.0 - Enhanced for 4-instance architecture
+
+version: 0.0
+os: linux
+
+files:
+  # Application source code
+  - source: /
+    destination: /opt/bluegreen-app
+    overwrite: true
+    
+  # Exclude non-essential files from deployment
+  - source: /
+    destination: /opt/bluegreen-app
+    file_exists_behavior: OVERWRITE
+    
+permissions:
+  # Set proper permissions for application files
+  - object: /opt/bluegreen-app
+    pattern: "**"
+    owner: ec2-user
+    group: ec2-user
+    mode: 755
+    type:
+      - file
+      - directory
+      
+  # Make scripts executable
+  - object: /opt/bluegreen-app/scripts
+    pattern: "**/*.sh"
+    owner: ec2-user
+    group: ec2-user
+    mode: 755
+    type:
+      - file
+      
+  # Log directory permissions
+  - object: /opt/bluegreen-app/logs
+    owner: ec2-user
+    group: ec2-user
+    mode: 755
+    type:
+      - directory
+
+hooks:
+  # Stop running applications and services
+  ApplicationStop:
+    - location: scripts/codedeploy/stop-services.sh
+      timeout: 300
+      runas: ec2-user
+      
+  # Prepare environment before installation
+  BeforeInstall:
+    - location: scripts/codedeploy/prepare-environment.sh
+      timeout: 300
+      runas: root
+      
+  # Install dependencies and prepare application
+  AfterInstall:
+    - location: scripts/codedeploy/install-dependencies.sh
+      timeout: 600
+      runas: ec2-user
+      
+  # Configure NGINX and application settings
+  BeforeStart:
+    - location: scripts/codedeploy/configure-services.sh
+      timeout: 300
+      runas: root
+      
+  # Start applications and services
+  ApplicationStart:
+    - location: scripts/codedeploy/start-services.sh
+      timeout: 300
+      runas: ec2-user
+      
+  # Validate that the deployment was successful
+  ValidateService:
+    - location: scripts/codedeploy/validate-deployment.sh
+      timeout: 300
+      runas: ec2-user

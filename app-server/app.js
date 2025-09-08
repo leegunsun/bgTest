@@ -42,11 +42,129 @@ function getDeploymentMetadata() {
 const currentTheme = THEMES[COLOR_THEME] || THEMES.blue;
 const deploymentMetadata = getDeploymentMetadata();
 
-const server = http.createServer((req, res) => {
+// Enhanced health check functions for ALB integration
+async function checkDatabaseConnection() {
+    // Simulate database connectivity check
+    // In real implementation, this would check actual database connectivity
+    return new Promise((resolve) => {
+        setTimeout(() => {
+            resolve(true);
+        }, 10);
+    });
+}
+
+async function checkExternalServices() {
+    // Simulate external service checks
+    // In real implementation, this would check dependent services
+    return new Promise((resolve) => {
+        setTimeout(() => {
+            resolve(true);
+        }, 10);
+    });
+}
+
+async function performDeepHealthCheck() {
+    try {
+        // Database connectivity check
+        const dbHealthy = await checkDatabaseConnection();
+        
+        // Memory usage check
+        const memUsage = process.memoryUsage();
+        const memHealthy = memUsage.heapUsed < memUsage.heapTotal * 0.9;
+        
+        // External services check
+        const extServicesHealthy = await checkExternalServices();
+        
+        // Process uptime check (should be running for at least 10 seconds)
+        const uptimeHealthy = process.uptime() > 10;
+        
+        // Response time check (simulate application response time)
+        const startTime = process.hrtime();
+        await new Promise(resolve => setTimeout(resolve, 1));
+        const [seconds, nanoseconds] = process.hrtime(startTime);
+        const responseTime = seconds * 1000 + nanoseconds / 1000000;
+        const responseTimeHealthy = responseTime < 100; // Less than 100ms
+        
+        const checks = {
+            database: dbHealthy ? 'ok' : 'failed',
+            memory: memHealthy ? 'ok' : 'failed',
+            externalServices: extServicesHealthy ? 'ok' : 'failed',
+            uptime: uptimeHealthy ? 'ok' : 'failed',
+            responseTime: responseTimeHealthy ? 'ok' : 'failed',
+            details: {
+                memoryUsage: memUsage,
+                uptime: process.uptime(),
+                responseTimeMs: responseTime.toFixed(2)
+            }
+        };
+        
+        const allHealthy = dbHealthy && memHealthy && extServicesHealthy && uptimeHealthy && responseTimeHealthy;
+        
+        return {
+            healthy: allHealthy,
+            checks: checks
+        };
+        
+    } catch (error) {
+        return {
+            healthy: false,
+            checks: {
+                error: error.message
+            }
+        };
+    }
+}
+
+const server = http.createServer(async (req, res) => {
     console.log(`${currentTheme.name} Server (${VERSION}): ${req.method} ${req.url}`);
     
-    // Health check endpoint with dynamic information
+    // Basic health check endpoint (NGINX level)
     if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('healthy\n');
+        return;
+    }
+
+    // Deep health check endpoint for ALB integration
+    if (req.url === '/health/deep') {
+        try {
+            const healthStatus = await performDeepHealthCheck();
+            
+            if (healthStatus.healthy) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    status: 'healthy',
+                    timestamp: new Date().toISOString(),
+                    environment: ENV_NAME,
+                    version: VERSION,
+                    deployment_id: DEPLOYMENT_ID,
+                    port: PORT,
+                    checks: healthStatus.checks
+                }));
+            } else {
+                res.writeHead(503, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    status: 'unhealthy',
+                    timestamp: new Date().toISOString(),
+                    environment: ENV_NAME,
+                    version: VERSION,
+                    checks: healthStatus.checks
+                }));
+            }
+        } catch (error) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                status: 'error',
+                timestamp: new Date().toISOString(),
+                environment: ENV_NAME,
+                message: error.message
+            }));
+        }
+        return;
+    }
+
+    // Legacy health endpoint with full information (backward compatibility)
+    if (req.url === '/health/legacy') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ 
             status: 'healthy', 

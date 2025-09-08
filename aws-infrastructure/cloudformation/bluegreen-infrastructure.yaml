@@ -1,0 +1,650 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'True Blue-Green Deployment Infrastructure - Dual EC2 + AWS ALB'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bluegreen-deployment
+    Description: Project name for resource naming
+  
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Environment name
+  
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+    Description: EC2 instance type (recommended t3.medium for production)
+  
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR block
+  
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: Public subnet 1 CIDR block
+  
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: Public subnet 2 CIDR block
+  
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.10.0/24
+    Description: Private subnet 1 CIDR block
+  
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.20.0/24
+    Description: Private subnet 2 CIDR block
+
+Resources:
+  # VPC Configuration
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-subnet-1
+        - Key: Type
+          Value: Public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-subnet-2
+        - Key: Type
+          Value: Public
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-subnet-1
+        - Key: Type
+          Value: Private
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-subnet-2
+        - Key: Type
+          Value: Private
+
+  # NAT Gateways
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-routes-1
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-routes-2
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-alb-sg
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb-sg
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-ec2-sg
+      GroupDescription: Security group for EC2 instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16  # VPC CIDR for SSH access
+        - IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3004
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ec2-sg
+
+  # IAM Roles and Policies
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: CodeDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:*
+                  - ec2:DescribeInstances
+                  - tag:GetResources
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProjectName}-${Environment}-ec2-profile
+      Roles:
+        - !Ref EC2Role
+
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-codedeploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+        - arn:aws:iam::aws:policy/AutoScalingFullAccess
+      Policies:
+        - PolicyName: ELBPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:*
+                Resource: '*'
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Target Groups
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-blue-tg
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /health/deep
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-blue-tg
+        - Key: Environment
+          Value: Blue
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-green-tg
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /health/deep
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-green-tg
+        - Key: Environment
+          Value: Green
+
+  # ALB Listener (starts with Blue Target Group)
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref BlueTargetGroup
+
+  # Launch Template for Auto Scaling
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${ProjectName}-${Environment}-lt
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y nginx nodejs npm ruby wget curl
+            
+            # Install Node.js 18 via nvm
+            curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+            source ~/.bashrc
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm install 18
+            nvm use 18
+            nvm alias default 18
+            
+            # Install PM2 for process management
+            npm install -g pm2
+            pm2 startup systemd
+            
+            # Install CodeDeploy agent
+            cd /home/ec2-user
+            wget https://aws-codedeploy-us-east-1.s3.us-east-1.amazonaws.com/latest/install
+            chmod +x ./install
+            ./install auto
+            systemctl start codedeploy-agent
+            systemctl enable codedeploy-agent
+            
+            # Install CloudWatch agent
+            wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+            rpm -U ./amazon-cloudwatch-agent.rpm
+            
+            # Create application directory
+            mkdir -p /opt/bluegreen-app/{logs,temp,config}
+            chown -R ec2-user:ec2-user /opt/bluegreen-app
+            
+            # Configure NGINX
+            systemctl start nginx
+            systemctl enable nginx
+            
+            # Signal CloudFormation of successful completion
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${ProjectName}-${Environment}-instance
+              - Key: Environment
+                Value: !Ref Environment
+              - Key: Project
+                Value: !Ref ProjectName
+
+  # Auto Scaling Group for Blue Environment
+  BlueAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${ProjectName}-${Environment}-blue-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref BlueTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-blue-instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: Blue
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: !Ref ProjectName
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT10M
+        WaitOnResourceSignals: true
+
+  # Auto Scaling Group for Green Environment
+  GreenAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${ProjectName}-${Environment}-green-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 3
+      DesiredCapacity: 0  # Start with 0, scale up during deployments
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref GreenTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-green-instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: Green
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: !Ref ProjectName
+          PropagateAtLaunch: true
+
+  # CodeDeploy Application
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub ${ProjectName}-${Environment}-app
+      ComputePlatform: Server
+
+  # CodeDeploy Deployment Groups
+  BlueDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub ${ProjectName}-${Environment}-blue-dg
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      AutoScalingGroups:
+        - !Ref BlueAutoScalingGroup
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - Name: !GetAtt BlueTargetGroup.TargetGroupName
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+  GreenDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub ${ProjectName}-${Environment}-green-dg
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      AutoScalingGroups:
+        - !Ref GreenAutoScalingGroup
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - Name: !GetAtt GreenTargetGroup.TargetGroupName
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-VPC-ID
+
+  ApplicationLoadBalancerArn:
+    Description: Application Load Balancer ARN
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ALB-ARN
+
+  ApplicationLoadBalancerDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ALB-DNS
+
+  BlueTargetGroupArn:
+    Description: Blue Target Group ARN
+    Value: !Ref BlueTargetGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Blue-TG-ARN
+
+  GreenTargetGroupArn:
+    Description: Green Target Group ARN
+    Value: !Ref GreenTargetGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Green-TG-ARN
+
+  CodeDeployApplicationName:
+    Description: CodeDeploy Application Name
+    Value: !Ref CodeDeployApplication
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CodeDeploy-App
+
+  BlueDeploymentGroupName:
+    Description: Blue Deployment Group Name
+    Value: !Ref BlueDeploymentGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Blue-DG
+
+  GreenDeploymentGroupName:
+    Description: Green Deployment Group Name
+    Value: !Ref GreenDeploymentGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Green-DG
+
+  EC2SecurityGroupId:
+    Description: EC2 Security Group ID
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EC2-SG-ID
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Private-Subnet-1-ID
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Private-Subnet-2-ID
