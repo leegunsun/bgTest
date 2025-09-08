@@ -4,7 +4,8 @@
 
 default:
   tags:
-    - mac-mini
+    #    - mac-mini
+    - home-runner
 
 stages:
   - build-dev
@@ -157,7 +158,7 @@ detect-active-environment:
         echo "$DEPLOY_TARGET" > ~/deploy_target.env
       '
 
-# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME)
+# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME).
 deploy-to-inactive-environment:
   stage: deploy-inactive-dev
   image: alpine:latest
@@ -245,18 +246,23 @@ deploy-to-inactive-environment:
         if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
           echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
           
-          # TRUE ZERO-DOWNTIME DEPLOYMENT - NO CONTAINER STOP/KILL
+          # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
           
-          # Rebuild API server with latest fixes (network access issue resolution)
-          echo "🔧 Rebuilding API server with network access fixes..."
-          docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate api-server
+          # Check if API server needs rebuild (only if unhealthy)
+          API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
+          if [ "$API_STATUS" != "healthy" ]; then
+            echo "🔧 API server unhealthy, rebuilding..."
+            docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
+            docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
+          else
+            echo "✅ API server healthy, skipping rebuild"
+          fi
           
-          # Rebuild target application environment
-          echo "🎯 Rebuilding $DEPLOY_TARGET application environment..."
+          # Rebuild ONLY target application environment (True Blue-Green)
+          echo "🎯 Rebuilding ONLY $DEPLOY_TARGET application environment..."
           docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
+          docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app
           
           echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
           sleep 45  # Extended wait time for API server + target environment startup
@@ -668,7 +674,7 @@ verify-deployment:
         fi
       '
 
-# 9. Cleanup Previous Environment (Manual)
+# 9. Cleanup Previous Environment (Manual).
 cleanup-previous-environment:
   stage: cleanup-dev
   image: alpine:latest
@@ -677,16 +683,53 @@ cleanup-previous-environment:
   when: manual
   allow_failure: true
   script:
-    - echo "🧹 Cleaning up previous environment..."
+    - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        CURRENT_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
-        
-        echo "🗑️  Optionally scaling down previous $CURRENT_ACTIVE environment..."
-        echo "   (Both environments remain available for instant rollback)"
-        echo "   Previous environment: $CURRENT_ACTIVE"
-        echo "   Cleanup completed"
+
+        echo "🔍 Determine previous active environment..."
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
+        echo "Previous active: $PREVIOUS_ACTIVE"
+
+        # Safety check: If previous active equals deploy_target, then no-op
+        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
+        if [ "$PREVIOUS_ACTIVE" = "$DEPLOY_TARGET" ]; then
+          echo "ℹ️  PREVIOUS_ACTIVE equals DEPLOY_TARGET; nothing to cleanup."
+          exit 0
+        fi
+
+        APP_NAME="${PREVIOUS_ACTIVE}-app"
+        echo "🧹 Cleaning up previous app container: $APP_NAME"
+
+        # 1) Find running containers that match the name filter
+        RUNNING_IDS=$(docker ps --filter "name=$APP_NAME" -q || true)
+        if [ -n "$RUNNING_IDS" ]; then
+          echo "⏳ Attempting graceful stop of running containers:"
+          docker ps --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          # graceful stop with 30s timeout
+          docker stop --time=30 $RUNNING_IDS || {
+            echo "⚠️ Some containers failed to stop gracefully; attempting forced removal"
+          }
+        fi
+
+        # 2) Remove any containers (running or exited) with this name
+        ALL_IDS=$(docker ps -a --filter "name=$APP_NAME" -q || true)
+        if [ -n "$ALL_IDS" ]; then
+          echo "🗑️ Removing containers (including volumes):"
+          docker ps -a --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+          docker rm -v $ALL_IDS || {
+            echo "⚠️ docker rm failed - please inspect"
+          }
+        else
+          echo "ℹ️ No containers found to remove for $APP_NAME"
+        fi
+
+        # 3) Prune dangling images
+        echo "🔍 Pruning dangling images..."
+        docker image prune -f --filter "dangling=true" || true
+
+        echo "🎉 Previous environment cleanup finished."
       '
 
 # 10. Emergency Rollback (Manual).
