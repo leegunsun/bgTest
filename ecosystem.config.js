@@ -26,10 +26,17 @@ module.exports = {
         NODE_ENV: 'staging',
         SERVER_PORT: 3001
       },
-      // Process management
+      // Process management (Enhanced with graceful shutdown)
       min_uptime: '10s',
       max_restarts: 5,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      listen_timeout: 10000,
+      kill_retry_time: 100,
+      
+      // Graceful shutdown configuration
+      shutdown_with_message: false,
+      wait_ready: true,
       
       // Logging
       log_file: '/opt/bluegreen-app/logs/app-1.log',
@@ -71,6 +78,13 @@ module.exports = {
       min_uptime: '10s',
       max_restarts: 5,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      listen_timeout: 10000,
+      kill_retry_time: 100,
+      
+      // Graceful shutdown configuration
+      shutdown_with_message: false,
+      wait_ready: true,
       
       log_file: '/opt/bluegreen-app/logs/app-2.log',
       out_file: '/opt/bluegreen-app/logs/app-2-out.log',
@@ -108,6 +122,13 @@ module.exports = {
       min_uptime: '10s',
       max_restarts: 5,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      listen_timeout: 10000,
+      kill_retry_time: 100,
+      
+      // Graceful shutdown configuration
+      shutdown_with_message: false,
+      wait_ready: true,
       
       log_file: '/opt/bluegreen-app/logs/app-3.log',
       out_file: '/opt/bluegreen-app/logs/app-3-out.log',
@@ -145,6 +166,13 @@ module.exports = {
       min_uptime: '10s',
       max_restarts: 5,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      listen_timeout: 10000,
+      kill_retry_time: 100,
+      
+      // Graceful shutdown configuration
+      shutdown_with_message: false,
+      wait_ready: true,
       
       log_file: '/opt/bluegreen-app/logs/app-4.log',
       out_file: '/opt/bluegreen-app/logs/app-4-out.log',

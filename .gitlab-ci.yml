@@ -25,6 +25,11 @@ variables:
   CODEDEPLOY_APPLICATION_NAME: "bluegreen-deployment-production-app"
   CODEDEPLOY_S3_BUCKET: "bluegreen-codedeploy-artifacts"
   
+  # OIDC Configuration for Secure AWS Authentication
+  AWS_ROLE_ARN: "${AWS_ROLE_ARN}"  # Set in GitLab CI/CD variables
+  AWS_WEB_IDENTITY_TOKEN_FILE: "/tmp/web-identity-token"
+  AWS_ROLE_SESSION_NAME: "GitLab-CI-${CI_PROJECT_NAME}-${CI_JOB_ID}"
+  
   # Target Group Configuration
   BLUE_TARGET_GROUP: "bluegreen-deployment-production-blue-tg"
   GREEN_TARGET_GROUP: "bluegreen-deployment-production-green-tg"
@@ -38,6 +43,75 @@ variables:
   # Docker configuration (for backwards compatibility)
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
+
+# OIDC Authentication Setup - Reusable template
+.aws-oidc-auth: &aws-oidc-auth
+  # OIDC token authentication for secure AWS access
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: "${AWS_ROLE_ARN}"
+  before_script:
+    - |
+      # Enhanced OIDC authentication with comprehensive error handling
+      echo "Setting up OIDC authentication for AWS..."
+      
+      # Validate required OIDC environment variables
+      if [ -z "$AWS_ROLE_ARN" ]; then
+        echo "❌ AWS_ROLE_ARN is not set. Please configure in GitLab CI/CD variables."
+        exit 1
+      fi
+      
+      if [ -z "$GITLAB_OIDC_TOKEN" ]; then
+        echo "❌ GITLAB_OIDC_TOKEN is not available. Check GitLab OIDC configuration."
+        exit 1
+      fi
+      
+      # Save OIDC token to file for AWS CLI
+      echo "$GITLAB_OIDC_TOKEN" > "$AWS_WEB_IDENTITY_TOKEN_FILE"
+      chmod 600 "$AWS_WEB_IDENTITY_TOKEN_FILE"
+      
+      # Install AWS CLI v2 for better OIDC support
+      if ! command -v aws &> /dev/null; then
+        echo "Installing AWS CLI v2..."
+        apk add --no-cache curl unzip
+        curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        ./aws/install
+        rm -rf aws/ awscliv2.zip
+      fi
+      
+      # Assume role using OIDC token
+      echo "Assuming AWS role: $AWS_ROLE_ARN"
+      CREDENTIALS=$(aws sts assume-role-with-web-identity \
+        --role-arn "$AWS_ROLE_ARN" \
+        --role-session-name "$AWS_ROLE_SESSION_NAME" \
+        --web-identity-token file://"$AWS_WEB_IDENTITY_TOKEN_FILE" \
+        --duration-seconds 3600 \
+        --output json)
+      
+      if [ $? -ne 0 ] || [ -z "$CREDENTIALS" ]; then
+        echo "❌ Failed to assume AWS role using OIDC token"
+        exit 1
+      fi
+      
+      # Export temporary AWS credentials
+      export AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
+      export AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
+      
+      # Validate credentials
+      aws sts get-caller-identity > /dev/null
+      if [ $? -eq 0 ]; then
+        echo "✅ AWS OIDC authentication successful"
+        ASSUMED_ROLE=$(aws sts get-caller-identity --query 'Arn' --output text)
+        echo "Current role: $ASSUMED_ROLE"
+      else
+        echo "❌ AWS credentials validation failed"
+        exit 1
+      fi
+      
+      # Clean up token file for security
+      rm -f "$AWS_WEB_IDENTITY_TOKEN_FILE"
 
 # Build stage - Universal for all deployment strategies
 build:
@@ -111,7 +185,7 @@ package:
   dependencies:
     - build
   before_script:
-    - apk add --no-cache zip aws-cli
+    - apk add --no-cache zip curl jq unzip
   script:
     - echo "Creating deployment package..."
     - |
@@ -203,6 +277,7 @@ only:
 
 # Production deployment - Blue environment via CodeDeploy
 deploy-to-blue-production:
+  <<: *aws-oidc-auth
   stage: deploy-production
   image: alpine:latest
   dependencies:
@@ -211,9 +286,6 @@ deploy-to-blue-production:
     ENVIRONMENT: production
     DEPLOYMENT_GROUP: blue
     TARGET_GROUP: "${BLUE_TARGET_GROUP}"
-  before_script:
-    - apk add --no-cache aws-cli curl jq
-    - aws --version
   script:
     - echo "Deploying to Blue production environment via CodeDeploy..."
     - |
@@ -279,6 +351,7 @@ deploy-to-blue-production:
 
 # Production deployment - Green environment via CodeDeploy
 deploy-to-green-production:
+  <<: *aws-oidc-auth
   stage: deploy-production
   image: alpine:latest
   dependencies:
@@ -287,8 +360,6 @@ deploy-to-green-production:
     ENVIRONMENT: production
     DEPLOYMENT_GROUP: green
     TARGET_GROUP: "${GREEN_TARGET_GROUP}"
-  before_script:
-    - apk add --no-cache aws-cli curl jq
   script:
     - echo "Deploying to Green production environment via CodeDeploy..."
     - |
@@ -336,12 +407,11 @@ deploy-to-green-production:
 
 # Traffic switching - ALB target group management
 switch-traffic-to-blue:
+  <<: *aws-oidc-auth
   stage: switch-traffic
   image: alpine:latest
   dependencies:
     - deploy-to-blue-production
-  before_script:
-    - apk add --no-cache aws-cli curl jq
   script:
     - echo "Switching traffic to Blue environment..."
     - |
@@ -392,12 +462,11 @@ switch-traffic-to-blue:
     - main
 
 switch-traffic-to-green:
+  <<: *aws-oidc-auth
   stage: switch-traffic
   image: alpine:latest
   dependencies:
     - deploy-to-green-production
-  before_script:
-    - apk add --no-cache aws-cli curl jq
   script:
     - echo "Switching traffic to Green environment..."
     - |
@@ -477,10 +546,9 @@ validate-deployment:
 
 # Rollback stage - Emergency rollback capability
 emergency-rollback:
+  <<: *aws-oidc-auth
   stage: rollback
   image: alpine:latest
-  before_script:
-    - apk add --no-cache aws-cli
   script:
     - echo "Performing emergency rollback..."
     - |
@@ -504,10 +572,9 @@ emergency-rollback:
 
 # Utility jobs for monitoring and management
 show-infrastructure-status:
+  <<: *aws-oidc-auth
   stage: validate
   image: alpine:latest
-  before_script:
-    - apk add --no-cache aws-cli curl jq
   script:
     - echo "=== Infrastructure Status ==="
     - |
@@ -536,10 +603,9 @@ show-infrastructure-status:
 
 # Cleanup old artifacts
 cleanup-s3-artifacts:
+  <<: *aws-oidc-auth
   stage: validate
   image: alpine:latest
-  before_script:
-    - apk add --no-cache aws-cli
   script:
     - echo "Cleaning up old S3 artifacts..."
     - |

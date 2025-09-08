@@ -46,50 +46,82 @@ Internet → ALB → [Blue EC2] [Green EC2]
 3. **Access type**: Programmatic access 선택
 4. **Next: Permissions** 클릭
 
-#### 1.2 필수 IAM 정책 연결
-사용자에게 다음 정책들을 연결하세요:
+#### 1.2 필수 IAM 정책 연결 (최소 권한 원칙 적용)
 
-**관리형 정책 (AWS 제공)**:
+⚠️ **중요**: 보안 모범 사례에 따라 최소 권한 원칙을 적용합니다. 광범위한 Full Access 정책 대신 필요한 권한만 부여합니다.
+
+**권장 관리형 정책 (최소한만 사용)**:
 ```
-- AmazonEC2FullAccess
-- AmazonVPCFullAccess
-- IAMFullAccess
-- AWSCloudFormationFullAccess
-- AWSCodeDeployFullAccess
-- ElasticLoadBalancingFullAccess
-- AutoScalingFullAccess
-- AmazonS3FullAccess
-- CloudWatchLogsFullAccess
+- CloudWatchLogsFullAccess  # 로그 모니터링용
 ```
 
-**사용자 정의 정책 생성**:
+**사용자 정의 정책 생성 (최소 권한 적용)**:
 ```json
 {
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "AllowS3ArtifactAccess",
             "Effect": "Allow",
             "Action": [
-                "elasticloadbalancing:ModifyListener",
-                "elasticloadbalancing:DescribeTargetGroups",
-                "elasticloadbalancing:DescribeTargetHealth",
-                "elasticloadbalancing:DescribeListeners",
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::bluegreen-codedeploy-artifacts-*",
+                "arn:aws:s3:::bluegreen-codedeploy-artifacts-*/*"
+            ]
+        },
+        {
+            "Sid": "AllowCodeDeployActions",
+            "Effect": "Allow",
+            "Action": [
                 "codedeploy:CreateDeployment",
                 "codedeploy:GetApplication",
                 "codedeploy:GetDeployment",
                 "codedeploy:GetDeploymentConfig",
                 "codedeploy:ListDeployments",
                 "codedeploy:StopDeployment",
-                "s3:PutObject",
-                "s3:GetObject",
-                "s3:DeleteObject",
-                "s3:ListBucket"
+                "codedeploy:GetDeploymentGroup",
+                "codedeploy:ListDeploymentGroups"
+            ],
+            "Resource": [
+                "arn:aws:codedeploy:*:*:application/bluegreen-deployment-*",
+                "arn:aws:codedeploy:*:*:deploymentgroup:bluegreen-deployment-*/*"
+            ]
+        },
+        {
+            "Sid": "AllowELBReadAndModifySpecificListener",
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:DescribeTargetGroups",
+                "elasticloadbalancing:DescribeListeners",
+                "elasticloadbalancing:DescribeTargetHealth",
+                "elasticloadbalancing:ModifyListener",
+                "elasticloadbalancing:DescribeLoadBalancers"
             ],
             "Resource": "*"
+        },
+        {
+            "Sid": "AllowCloudFormationRead",
+            "Effect": "Allow",
+            "Action": [
+                "cloudformation:DescribeStacks",
+                "cloudformation:ListStackResources",
+                "cloudformation:DescribeStackResources"
+            ],
+            "Resource": "arn:aws:cloudformation:*:*:stack/bluegreen-deployment-*/*"
         }
     ]
 }
 ```
+
+**🛡️ 보안 개선 권장사항**:
+1. **OIDC 인증 사용**: 액세스 키 대신 GitLab → AWS OIDC 인증 방식 사용 권장
+2. **리소스 수준 제한**: 특정 S3 버킷, CodeDeploy 애플리케이션으로 권한 제한
+3. **정기적 권한 검토**: 최소 3개월마다 권한 사용 현황 검토
+4. **Account ID 교체**: `bluegreen-codedeploy-artifacts-*`를 실제 Account ID로 교체
 
 #### 1.3 액세스 키 생성
 1. 사용자 생성 완료 후 **Security credentials** 탭

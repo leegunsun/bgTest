@@ -273,7 +273,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-ec2-sg
 
-  # IAM Roles and Policies
+  # IAM Roles and Policies (Enhanced with least privilege principle)
   EC2Role:
     Type: AWS::IAM::Role
     Properties:
@@ -286,20 +286,53 @@ Resources:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
-        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
-        - PolicyName: CodeDeployPolicy
+        - PolicyName: CodeDeployAgentPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - codedeploy:*
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:RegisterApplicationRevision
+                Resource: 
+                  - !Sub 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application/${ProjectName}-${Environment}-app'
+                  - !Sub 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${ProjectName}-${Environment}-app/*'
+              - Effect: Allow
+                Action:
                   - ec2:DescribeInstances
                   - tag:GetResources
                 Resource: '*'
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codedeploy*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/var/log/codedeploy*'
+        - PolicyName: S3ArtifactPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - 'arn:aws:s3:::bluegreen-codedeploy-artifacts*'
+                  - 'arn:aws:s3:::bluegreen-codedeploy-artifacts*/*'
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -321,16 +354,52 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-        - arn:aws:iam::aws:policy/AutoScalingFullAccess
       Policies:
-        - PolicyName: ELBPolicy
+        - PolicyName: ELBLimitedPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - elasticloadbalancing:*
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
                 Resource: '*'
+        - PolicyName: AutoScalingLimitedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeAutoScalingInstances
+                  - autoscaling:DescribeLaunchConfigurations
+                  - autoscaling:DescribeLaunchTemplates
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                Resource: 
+                  - !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${ProjectName}-${Environment}-*'
+        - PolicyName: CodeDeployLimitedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:RegisterApplicationRevision
+                  - codedeploy:StopDeployment
+                Resource: 
+                  - !Sub 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application/${ProjectName}-${Environment}-app'
+                  - !Sub 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${ProjectName}-${Environment}-app/*'
 
   # Application Load Balancer
   ApplicationLoadBalancer:
@@ -350,7 +419,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # Target Groups
+  # Target Groups (Enhanced with deregistration delay and optimized health checks)
   BlueTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -360,14 +429,21 @@ Resources:
       VpcId: !Ref VPC
       TargetType: instance
       HealthCheckPath: /health/deep
-      HealthCheckIntervalSeconds: 30
+      HealthCheckIntervalSeconds: 10
       HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 2
       HealthCheckProtocol: HTTP
       HealthCheckPort: traffic-port
       Matcher:
         HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '300'
+        - Key: load_balancing.algorithm.type
+          Value: least_outstanding_requests
+        - Key: stickiness.enabled
+          Value: 'false'
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-blue-tg
@@ -383,14 +459,21 @@ Resources:
       VpcId: !Ref VPC
       TargetType: instance
       HealthCheckPath: /health/deep
-      HealthCheckIntervalSeconds: 30
+      HealthCheckIntervalSeconds: 10
       HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 2
       HealthCheckProtocol: HTTP
       HealthCheckPort: traffic-port
       Matcher:
         HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '300'
+        - Key: load_balancing.algorithm.type
+          Value: least_outstanding_requests
+        - Key: stickiness.enabled
+          Value: 'false'
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-green-tg
@@ -547,13 +630,14 @@ Resources:
       ApplicationName: !Sub ${ProjectName}-${Environment}-app
       ComputePlatform: Server
 
-  # CodeDeploy Deployment Groups
+  # CodeDeploy Deployment Groups (Enhanced with Blue/Green configuration)
   BlueDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
     Properties:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub ${ProjectName}-${Environment}-blue-dg
       ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
       AutoScalingGroups:
         - !Ref BlueAutoScalingGroup
       LoadBalancerInfo:
@@ -564,6 +648,10 @@ Resources:
         Events:
           - DEPLOYMENT_FAILURE
           - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_INSTANCE_FAILURE
+      AlarmConfiguration:
+        Enabled: false
+        IgnorePollAlarmFailure: false
 
   GreenDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
@@ -571,6 +659,7 @@ Resources:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub ${ProjectName}-${Environment}-green-dg
       ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
       AutoScalingGroups:
         - !Ref GreenAutoScalingGroup
       LoadBalancerInfo:
@@ -581,6 +670,10 @@ Resources:
         Events:
           - DEPLOYMENT_FAILURE
           - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_INSTANCE_FAILURE
+      AlarmConfiguration:
+        Enabled: false
+        IgnorePollAlarmFailure: false
 
 Outputs:
   VPCId:

@@ -1,20 +1,16 @@
 # AWS CodeDeploy Application Specification
-# Blue-Green Deployment with ALB Integration
-# Version: 2.0 - Enhanced for 4-instance architecture
+# Enhanced Blue-Green Deployment with ALB Integration
+# Version: 3.0 - Improved with graceful shutdown and comprehensive hooks
+# Based on AWS Best Practices and 개선문서.md recommendations
 
 version: 0.0
 os: linux
 
 files:
-  # Application source code
+  # Application source code and configuration
   - source: /
     destination: /opt/bluegreen-app
     overwrite: true
-    
-  # Exclude non-essential files from deployment
-  - source: /
-    destination: /opt/bluegreen-app
-    file_exists_behavior: OVERWRITE
     
 permissions:
   # Set proper permissions for application files
@@ -45,38 +41,38 @@ permissions:
       - directory
 
 hooks:
-  # Stop running applications and services
+  # 1. Prepare for traffic blocking (new hook for graceful pre-drain)
+  BeforeBlockTraffic:
+    - location: scripts/codedeploy/before-block-traffic.sh
+      timeout: 600
+      runas: root
+
+  # 2. Stop running applications and services with graceful shutdown
   ApplicationStop:
-    - location: scripts/codedeploy/stop-services.sh
-      timeout: 300
-      runas: ec2-user
-      
-  # Prepare environment before installation
-  BeforeInstall:
-    - location: scripts/codedeploy/prepare-environment.sh
-      timeout: 300
+    - location: scripts/codedeploy/stop-app.sh
+      timeout: 600
       runas: root
       
-  # Install dependencies and prepare application
+  # 3. Prepare environment before installation
+  BeforeInstall:
+    - location: scripts/codedeploy/before-install.sh
+      timeout: 600
+      runas: root
+      
+  # 4. Install dependencies and prepare application
   AfterInstall:
-    - location: scripts/codedeploy/install-dependencies.sh
+    - location: scripts/codedeploy/after-install.sh
       timeout: 600
       runas: ec2-user
       
-  # Configure NGINX and application settings
-  BeforeStart:
-    - location: scripts/codedeploy/configure-services.sh
-      timeout: 300
-      runas: root
-      
-  # Start applications and services
+  # 5. Start applications and services with health checking
   ApplicationStart:
-    - location: scripts/codedeploy/start-services.sh
-      timeout: 300
+    - location: scripts/codedeploy/start-app.sh
+      timeout: 600
       runas: ec2-user
       
-  # Validate that the deployment was successful
+  # 6. Comprehensive service validation
   ValidateService:
-    - location: scripts/codedeploy/validate-deployment.sh
+    - location: scripts/codedeploy/validate-service.sh
       timeout: 300
       runas: ec2-user
