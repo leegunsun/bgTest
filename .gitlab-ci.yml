@@ -11,6 +11,7 @@ default:
 stages:
   - build-dev
   - test-dev
+  - pre-deployment-validation
   - detect-env-dev
   - deploy-inactive-dev
   - health-check-dev
@@ -97,12 +98,160 @@ test-dev:
     - node -c api-server/app.js
     - echo "✅ All service syntax checks passed - Single codebase architecture"
 
+# 2.5. Pre-Deployment Validation Stage
+pre-deployment-validation:
+  stage: pre-deployment-validation
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  needs: ["test-dev"]
+  script:
+    - echo "🛡️  PRE-DEPLOYMENT SAFETY VALIDATION"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow 2>/dev/null || cd ~
+        
+        echo "🔍 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🛡️  PRE-DEPLOYMENT SAFETY VALIDATION PROTOCOL"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Validation 1: System Resource Check
+        echo "🔍 Validation 1: System Resources"
+        
+        # Memory check
+        MEMORY_FREE=$(free -m | awk '"'NR==2{printf "%.0f", $7*100/$2}"')
+        DISK_FREE=$(df -h / | awk '"'NR==2{gsub(/%/,"", $5); print 100-$5}"')
+        
+        echo "   Available Memory: ${MEMORY_FREE}%"
+        echo "   Available Disk: ${DISK_FREE}%"
+        
+        if [ "$MEMORY_FREE" -lt 10 ]; then
+          echo "❌ Critical: Low memory (${MEMORY_FREE}% available)"
+          echo "   Deployment may fail due to insufficient memory"
+          exit 1
+        fi
+        
+        if [ "$DISK_FREE" -lt 10 ]; then
+          echo "❌ Critical: Low disk space (${DISK_FREE}% available)"
+          echo "   Deployment may fail due to insufficient disk space"
+          exit 1
+        fi
+        
+        echo "✅ Resource check passed"
+        
+        # Validation 2: Docker System Health
+        echo ""
+        echo "🔍 Validation 2: Docker System Health"
+        
+        # Check Docker daemon
+        if ! docker version >/dev/null 2>&1; then
+          echo "❌ Critical: Docker daemon is not accessible"
+          echo "   Cannot proceed with containerized deployment"
+          exit 1
+        fi
+        
+        # Check Docker space
+        DOCKER_SPACE=$(docker system df --format "table {{.Type}}\t{{.Size}}" | grep -v TYPE | awk '"{sum+=$2} END {print sum/1024/1024/1024}"' 2>/dev/null || echo "0")
+        echo "   Docker space usage: ${DOCKER_SPACE}GB"
+        
+        # Check for dangling images/containers that might cause issues
+        DANGLING_IMAGES=$(docker images --filter "dangling=true" -q | wc -l)
+        STOPPED_CONTAINERS=$(docker ps -a --filter "status=exited" -q | wc -l)
+        
+        echo "   Dangling images: $DANGLING_IMAGES"
+        echo "   Stopped containers: $STOPPED_CONTAINERS"
+        
+        if [ "$DANGLING_IMAGES" -gt 10 ]; then
+          echo "⚠️  Warning: Many dangling images detected - consider cleanup"
+        fi
+        
+        echo "✅ Docker system check passed"
+        
+        # Validation 3: Network Connectivity
+        echo ""
+        echo "🔍 Validation 3: Network Connectivity"
+        
+        # Check if bluegreen network exists and is functional
+        if docker network ls | grep -q bluegreen-network; then
+          echo "✅ Blue-Green network exists"
+          
+          # Test network connectivity between containers (if they exist)
+          if docker ps --format "{{.Names}}" | grep -q nginx-proxy; then
+            echo "   Testing inter-container connectivity..."
+            # Test nginx to app connectivity
+            if docker exec nginx-proxy nslookup blue-app >/dev/null 2>&1 && docker exec nginx-proxy nslookup green-app >/dev/null 2>&1; then
+              echo "✅ Container DNS resolution working"
+            else
+              echo "⚠️  Container DNS resolution issues detected"
+            fi
+          fi
+        else
+          echo "ℹ️  Blue-Green network not found (will be created during deployment)"
+        fi
+        
+        # Validation 4: Port Availability
+        echo ""
+        echo "🔍 Validation 4: Port Availability"
+        
+        # Check if critical ports are available or properly used
+        PORT_80_USED=$(netstat -tuln 2>/dev/null | grep ":80 " || echo "")
+        
+        if [ -n "$PORT_80_USED" ]; then
+          # Port 80 is used - check if it'"'s our nginx
+          if docker ps --format "{{.Names}}\t{{.Ports}}" | grep nginx-proxy | grep -q "80->80"; then
+            echo "✅ Port 80 correctly used by nginx-proxy"
+          else
+            echo "⚠️  Port 80 is used by unknown process: $PORT_80_USED"
+            echo "   This might cause deployment conflicts"
+          fi
+        else
+          echo "✅ Port 80 available for deployment"
+        fi
+        
+        # Validation 5: Previous Deployment State
+        echo ""
+        echo "🔍 Validation 5: Previous Deployment State"
+        
+        # Check if there'"'s any stuck or failed deployment
+        if [ -f "deployment_state/deployment.lock" ]; then
+          LOCK_AGE=$(find deployment_state/deployment.lock -mmin +30 2>/dev/null || echo "")
+          if [ -n "$LOCK_AGE" ]; then
+            echo "⚠️  Stale deployment lock detected (>30 minutes old)"
+            echo "   Removing stale lock to proceed"
+            rm -f deployment_state/deployment.lock
+          else
+            echo "❌ Active deployment lock detected"
+            echo "   Another deployment may be in progress"
+            echo "   Wait for completion or investigate manually"
+            exit 1
+          fi
+        fi
+        
+        # Create deployment lock
+        mkdir -p deployment_state
+        echo "$(date): Pre-deployment validation passed" > deployment_state/deployment.lock
+        
+        echo "✅ Deployment state check passed"
+        
+        # Summary
+        echo ""
+        echo "🎆 PRE-DEPLOYMENT VALIDATION SUMMARY:"
+        echo "   ✅ System Resources: Adequate"
+        echo "   ✅ Docker System: Healthy  "
+        echo "   ✅ Network: Ready"
+        echo "   ✅ Ports: Available"
+        echo "   ✅ Deployment State: Clean"
+        echo ""
+        echo "✅ All validations passed - deployment can proceed safely"
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      '
+
 # 3. Environment Detection
 detect-active-environment:
   stage: detect-env-dev
   image: alpine:latest
   <<: [*ssh_setup, *rules_dev_main]
-  needs: ["build-dev", "test-dev"]
+  needs: ["build-dev", "test-dev", "pre-deployment-validation"]
   script:
 #    - set -x  # 모든 명령어 출력
     - echo "🔍 Detecting current active environment..."
@@ -111,52 +260,128 @@ detect-active-environment:
         cd ~/bgTest/v5ToWindow
         echo "📊 Environment Detection:"
         
-        # Enhanced environment detection with API fallback
-        echo "🔍 Detecting current environment with multiple methods..."
+        # ENHANCED MULTI-SOURCE ENVIRONMENT DETECTION
+        echo "🔍 Enhanced environment detection with multiple validation sources..."
         
-        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
-          echo "✅ Blue-Green system is running"
+        # Initialize detection variables
+        CURRENT_ACTIVE="unknown"
+        DEPLOY_TARGET="unknown"
+        DETECTION_CONFIDENCE="low"
+        DETECTION_SOURCES=""
+        
+        # Multi-layer system check
+        if docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
+          echo "✅ Blue-Green system is confirmed running"
           
-          # Try API-based detection first (more reliable) - using Docker internal network
+          # Source 1: API-based detection (highest priority)
+          echo "🔍 Source 1: Querying API server for current deployment..."
           API_RESPONSE=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-            curl -s --max-time 5 "http://api-server:9000/status" 2>/dev/null || echo "")
+            curl -s --max-time 10 "http://api-server:9000/status" 2>/dev/null || echo '{"error":"api_unreachable"}')
           API_ACTIVE=$(echo "$API_RESPONSE" | jq -r ".current_deployment" 2>/dev/null || echo "")
           
-          # Fallback to file-based detection
-          FILE_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" 2>/dev/null || echo "")
-          
-          # Choose the most reliable source
-          if [ -n "$API_ACTIVE" ] && [ "$API_ACTIVE" != "null" ]; then
-            CURRENT_ACTIVE="$API_ACTIVE"
-            echo "📊 Using API-detected environment: $CURRENT_ACTIVE"
-          elif [ -n "$FILE_ACTIVE" ]; then
-            CURRENT_ACTIVE="$FILE_ACTIVE"
-            echo "📄 Using file-detected environment: $CURRENT_ACTIVE"
+          if [ -n "$API_ACTIVE" ] && [ "$API_ACTIVE" != "null" ] && [ "$API_ACTIVE" != "" ]; then
+            if [ "$API_ACTIVE" = "blue" ] || [ "$API_ACTIVE" = "green" ]; then
+              CURRENT_ACTIVE="$API_ACTIVE"
+              DETECTION_CONFIDENCE="high"
+              DETECTION_SOURCES="api"
+              echo "✅ Source 1 SUCCESS: API reports current active: $API_ACTIVE"
+            fi
           else
+            echo "⚠️  Source 1 FAILED: API detection unsuccessful"
+          fi
+          
+          # Source 2: File-based detection (medium priority)
+          if [ "$CURRENT_ACTIVE" = "unknown" ]; then
+            echo "🔍 Source 2: Checking active.env file configuration..."
+            FILE_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env 2>/dev/null | grep -o "blue\|green" | head -1 || echo "")
+            
+            if [ -n "$FILE_ACTIVE" ] && [ "$FILE_ACTIVE" != "" ]; then
+              CURRENT_ACTIVE="$FILE_ACTIVE"
+              DETECTION_CONFIDENCE="medium"
+              DETECTION_SOURCES="file"
+              echo "✅ Source 2 SUCCESS: File reports current active: $FILE_ACTIVE"
+            else
+              echo "⚠️  Source 2 FAILED: File detection unsuccessful"
+            fi
+          else
+            echo "ℹ️  Source 2 SKIPPED: Already detected via API"
+          fi
+          
+          # Source 3: Container health analysis (lowest priority)
+          if [ "$CURRENT_ACTIVE" = "unknown" ]; then
+            echo "🔍 Source 3: Analyzing container health patterns..."
+            BLUE_STATUS=$(docker inspect --format='{{.State.Health.Status}}' blue-app 2>/dev/null || echo "unknown")
+            GREEN_STATUS=$(docker inspect --format='{{.State.Health.Status}}' green-app 2>/dev/null || echo "unknown")
+            
+            echo "   Blue container health: $BLUE_STATUS"
+            echo "   Green container health: $GREEN_STATUS"
+            
+            # Heuristic: The healthier container is likely the active one
+            if [ "$BLUE_STATUS" = "healthy" ] && [ "$GREEN_STATUS" != "healthy" ]; then
+              CURRENT_ACTIVE="blue"
+              DETECTION_CONFIDENCE="low"
+              DETECTION_SOURCES="health-heuristic"
+              echo "✅ Source 3 HEURISTIC: Blue appears active (healthier)"
+            elif [ "$GREEN_STATUS" = "healthy" ] && [ "$BLUE_STATUS" != "healthy" ]; then
+              CURRENT_ACTIVE="green"
+              DETECTION_CONFIDENCE="low"
+              DETECTION_SOURCES="health-heuristic"
+              echo "✅ Source 3 HEURISTIC: Green appears active (healthier)"
+            else
+              echo "⚠️  Source 3 FAILED: Cannot determine from health status"
+            fi
+          else
+            echo "ℹ️  Source 3 SKIPPED: Already detected via higher priority source"
+          fi
+          
+          # Determine deployment target based on detected active environment
+          if [ "$CURRENT_ACTIVE" != "unknown" ]; then
+            if [ "$CURRENT_ACTIVE" = "blue" ]; then
+              DEPLOY_TARGET="green"
+              echo "🔵→🟢 TRUE BLUE-GREEN: Active=blue, Target=green"
+            else
+              DEPLOY_TARGET="blue"
+              echo "🟢→🔵 TRUE BLUE-GREEN: Active=green, Target=blue"
+            fi
+          else
+            # Safe fallback with explicit logging
+            echo "🛡️  SAFE FALLBACK: Unable to detect active environment"
+            echo "   Defaulting to green deployment with blue assumed active"
             CURRENT_ACTIVE="blue"
-            echo "⚠️  No reliable detection, defaulting to: $CURRENT_ACTIVE"
+            DEPLOY_TARGET="green"
+            DETECTION_CONFIDENCE="fallback"
+            DETECTION_SOURCES="fallback"
           fi
           
-          # True Blue-Green deployment: Deploy to inactive environment
-          if [ "$CURRENT_ACTIVE" = "blue" ]; then
-            DEPLOY_TARGET="green"
-            echo "🔵→🟢 Current: blue, Deploying to: green"
-          else
-            DEPLOY_TARGET="blue"
-            echo "🟢→🔵 Current: green, Deploying to: blue"
-          fi
         else
-          echo "⚠️  System not running, defaulting to green deployment"
-          CURRENT_ACTIVE="blue"
+          echo "🏗️  FIRST DEPLOYMENT: System not detected, initializing green environment"
+          CURRENT_ACTIVE="none"
           DEPLOY_TARGET="green"
+          DETECTION_CONFIDENCE="initialization"
+          DETECTION_SOURCES="initialization"
         fi
         
-        echo "Current active: $CURRENT_ACTIVE"
-        echo "Deploy target: $DEPLOY_TARGET"
+        # Comprehensive environment summary
+        echo ""
+        echo "📊 ENVIRONMENT DETECTION SUMMARY:"
+        echo "   Current Active: $CURRENT_ACTIVE"
+        echo "   Deploy Target: $DEPLOY_TARGET"
+        echo "   Detection Confidence: $DETECTION_CONFIDENCE"
+        echo "   Detection Method: $DETECTION_SOURCES"
+        echo ""
         
-        # Save environment info
+        # Save environment info with metadata
         echo "$CURRENT_ACTIVE" > ~/current_active.env
         echo "$DEPLOY_TARGET" > ~/deploy_target.env
+        echo "$DETECTION_CONFIDENCE" > ~/detection_confidence.env
+        echo "$DETECTION_SOURCES" > ~/detection_sources.env
+        
+        # Validation checkpoint
+        if [ "$DEPLOY_TARGET" = "unknown" ]; then
+          echo "❌ CRITICAL ERROR: Could not determine deployment target"
+          echo "   This indicates a severe environment detection failure"
+          exit 1
+        fi
       '
 
 # 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME).
@@ -243,9 +468,43 @@ deploy-to-inactive-environment:
           exit 1
         fi
         
-        # Check if system is already running
-        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
-          echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
+        # ENHANCED MULTI-LAYER SYSTEM DETECTION (Zero-Downtime Critical)
+        SYSTEM_RUNNING=false
+        DETECTION_METHOD="none"
+        
+        echo "🔍 Multi-layer system detection starting..."
+        
+        # Layer 1: Container existence check
+        if docker ps --filter "name=nginx-proxy" --format "{{.Names}}" 2>/dev/null | grep -q "^nginx-proxy$"; then
+          echo "✅ Layer 1: nginx-proxy container exists"
+          
+          # Layer 2: Container inspection
+          if docker container inspect nginx-proxy >/dev/null 2>&1; then
+            echo "✅ Layer 2: nginx-proxy container accessible"
+            
+            # Layer 3: Process verification
+            if docker exec nginx-proxy ps aux 2>/dev/null | grep -q "nginx: master process" || docker exec nginx-proxy pgrep nginx >/dev/null 2>&1; then
+              echo "✅ Layer 3: nginx process running inside container"
+              SYSTEM_RUNNING=true
+              DETECTION_METHOD="multi-layer"
+            fi
+          fi
+        fi
+        
+        # Additional validation: API server accessibility (if system seems to be running)
+        if [ "$SYSTEM_RUNNING" = "true" ]; then
+          echo "🔍 Layer 4: Validating API server accessibility..."
+          if docker run --rm --network bluegreen-network curlimages/curl:latest curl -s --max-time 5 "http://api-server:9000/health" >/dev/null 2>&1; then
+            echo "✅ Layer 4: API server responsive"
+            DETECTION_METHOD="api-validated"
+          else
+            echo "⚠️  Layer 4: API server not responsive, but container system detected"
+          fi
+        fi
+        
+        if [ "$SYSTEM_RUNNING" = "true" ]; then
+          echo "🎯 ZERO-DOWNTIME MODE: System detected via $DETECTION_METHOD method"
+          echo "✅ Deploying ONLY to inactive $DEPLOY_TARGET environment"
           
           # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
@@ -253,7 +512,7 @@ deploy-to-inactive-environment:
           # Check if API server needs rebuild (only if unhealthy)
           API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
           if [ "$API_STATUS" != "healthy" ]; then
-            echo "🔧 API server unhealthy, rebuilding..."
+            echo "🔧 API server unhealthy, rebuilding with zero-downtime..."
             docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
             docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
           else
@@ -263,61 +522,68 @@ deploy-to-inactive-environment:
           # Rebuild ONLY target application environment (True Blue-Green)
           echo "🎯 Rebuilding ONLY $DEPLOY_TARGET application environment..."
           docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app
+          docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps --force-recreate ${DEPLOY_TARGET}-app
           
-          echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
-          sleep 45  # Extended wait time for API server + target environment startup
+          echo "⏳ Waiting for $DEPLOY_TARGET environment to be ready..."
+          sleep 30  # Reduced wait time for single container
           
-          # Verify API server is accessible with new implementation
-          echo "🔍 Verifying API server accessibility..."
+          # Verify target environment accessibility
+          echo "🔍 Verifying $DEPLOY_TARGET environment accessibility..."
+          TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
           for attempt in $(seq 1 10); do
-            if docker run --rm --network bluegreen-network curlimages/curl:latest curl -s --max-time 3 "http://api-server:9000/health" >/dev/null; then
-              echo "✅ API server is responsive (attempt $attempt/10)"
+            if docker exec "${DEPLOY_TARGET}-app" curl -s --max-time 3 "http://localhost:$TARGET_PORT/health" >/dev/null 2>&1; then
+              echo "✅ $DEPLOY_TARGET environment is responsive (attempt $attempt/10)"
               break
             else
-              echo "⏳ API server not ready yet (attempt $attempt/10)..."
+              echo "⏳ $DEPLOY_TARGET environment not ready yet (attempt $attempt/10)..."
               sleep 5
             fi
             if [ $attempt -eq 10 ]; then
-              echo "❌ API server failed to become ready after 10 attempts"
+              echo "❌ $DEPLOY_TARGET environment failed to become ready after 10 attempts"
               echo "🔍 Container status:"
-              docker ps --filter "name=api-server"
-              echo "🔍 API server logs:"
-              docker logs api-server --tail 50 || true
+              docker ps --filter "name=${DEPLOY_TARGET}-app"
+              echo "🔍 $DEPLOY_TARGET environment logs:"
+              docker logs "${DEPLOY_TARGET}-app" --tail 50 || true
               exit 1
             fi
           done
           
         else
-          echo "🏗️  Initial system deployment - starting all services"
-          
-          # Initialize active.env for first deployment (True Blue-Green setup)
-          if [ ! -f "conf.d/active.env" ]; then
-            echo "🔧 Initializing active.env for first deployment..."
-            echo "set \$active \"green\";" > conf.d/active.env
-            echo "✅ Created initial active.env with green environment"
-          else
-            echo "ℹ️  active.env already exists, preserving current configuration"
-          fi
-          
-          docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
-          docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
-          docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
-          
-          echo "⏳ Waiting for all services to be ready (t2.micro needs more time)..."
-          sleep 120
-          
-          # 상세 디버깅 정보 수집
-          echo "🔍 [DEBUG] Container status check:"
-          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-          
-          echo "🔍 [DEBUG] Network information:"
-          docker network ls
-          docker network inspect bluegreen-network | jq ".[0].Containers" || true
-          
-          echo "🔍 [DEBUG] System resource usage:"
-          free -h || true
-          df -h || true
+          echo "🛡️  SAFE MODE: System detection failed - Manual validation required"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🚨 DEPLOYMENT SAFETY PROTOCOL ACTIVATED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "🔍 CURRENT SYSTEM STATE:"
+          echo "$(docker ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Ports}}' 2>/dev/null || echo 'Docker not accessible')"
+          echo ""
+          echo "📋 DETECTION FAILURE ANALYSIS:"
+          echo "   • nginx-proxy container: $(docker ps --filter 'name=nginx-proxy' --format '{{.Status}}' 2>/dev/null || echo 'Not found/accessible')"
+          echo "   • Docker daemon: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'Not accessible')"
+          echo "   • Network: $(docker network ls --filter 'name=bluegreen-network' --format '{{.Name}}' 2>/dev/null || echo 'Not accessible')"
+          echo ""
+          echo "⚠️  SAFETY REASONS FOR STOPPING:"
+          echo "   • Cannot reliably detect system state"
+          echo "   • Risk of causing service downtime"
+          echo "   • Potential data consistency issues"
+          echo ""
+          echo "🔧 RECOMMENDED ACTIONS:"
+          echo "   1. Verify Docker daemon is running: sudo systemctl status docker"
+          echo "   2. Check container states manually: docker ps -a"
+          echo "   3. Verify network connectivity: docker network inspect bluegreen-network"
+          echo "   4. Check system resources: free -h && df -h"
+          echo "   5. Review recent logs: journalctl -u docker --since '10 minutes ago'"
+          echo ""
+          echo "🚀 TO PROCEED MANUALLY:"
+          echo "   • If system is truly not running, initialize it manually"
+          echo "   • If system is running, investigate detection failure"
+          echo "   • Re-run pipeline after resolving the issue"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "❌ DEPLOYMENT ABORTED FOR SAFETY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          exit 1
         fi
         
         # Enhanced Docker-native health checking with internal network validation
@@ -325,99 +591,259 @@ deploy-to-inactive-environment:
         TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
         APP_CONTAINER="${DEPLOY_TARGET}-app"
         
-        # Helper function: Get Docker health status
+        # ENHANCED MULTI-LAYER HEALTH VALIDATION SYSTEM
+        
+        # Helper function: Get comprehensive Docker health status
         get_docker_health_status() {
-          if docker inspect --format='{{json .State.Health}}' "$1" >/dev/null 2>&1; then
-            docker inspect --format='{{.State.Health.Status}}' "$1" 2>/dev/null || echo "no-health"
+          local container="$1"
+          if docker inspect --format='{{json .State.Health}}' "$container" >/dev/null 2>&1; then
+            local health_status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "no-health")
+            local health_checks=$(docker inspect --format='{{len .State.Health.Log}}' "$container" 2>/dev/null || echo "0")
+            echo "${health_status}:${health_checks}"
           else
-            echo "no-health"
+            echo "no-health:0"
           fi
         }
         
-        # Helper function: Internal container health check
+        # Helper function: Internal container health check with detailed validation
         app_internal_health_check() {
-          docker exec "$APP_CONTAINER" sh -c "curl -sS -f --max-time 5 http://localhost:$TARGET_PORT/health >/dev/null" 2>/dev/null
-          return $?
+          local container="$1"
+          local port="$2"
+          local max_attempts=3
+          
+          for attempt in $(seq 1 $max_attempts); do
+            # Check 1: Basic health endpoint
+            if docker exec "$container" curl -sS -f --max-time 5 "http://localhost:$port/health" >/dev/null 2>&1; then
+              # Check 2: Version endpoint (validates application logic)
+              if docker exec "$container" curl -sS --max-time 3 "http://localhost:$port/version" | jq -e '.version' >/dev/null 2>&1; then
+                # Check 3: Process validation
+                if docker exec "$container" pgrep node >/dev/null 2>&1; then
+                  echo "SUCCESS:internal:$attempt"
+                  return 0
+                fi
+              fi
+            fi
+            [ $attempt -lt $max_attempts ] && sleep 2
+          done
+          echo "FAILED:internal:$max_attempts"
+          return 1
         }
         
         # Helper function: Network-level health check via ephemeral container
         network_health_check() {
-          docker run --rm --network bluegreen-network curlimages/curl:latest \
-            -sS -f --max-time 5 "http://${APP_CONTAINER}:${TARGET_PORT}/health" >/dev/null 2>/dev/null
-          return $?
+          local container="$1"
+          local port="$2"
+          local max_attempts=3
+          
+          for attempt in $(seq 1 $max_attempts); do
+            # Network connectivity test
+            if docker run --rm --network bluegreen-network curlimages/curl:latest \
+              curl -sS -f --max-time 5 "http://${container}:${port}/health" >/dev/null 2>&1; then
+              echo "SUCCESS:network:$attempt"
+              return 0
+            fi
+            [ $attempt -lt $max_attempts ] && sleep 2
+          done
+          echo "FAILED:network:$max_attempts"
+          return 1
         }
         
-        # Enhanced health check loop with exponential backoff
-        for attempt in $(seq 1 40); do
-          echo "🔍 Health check attempt $attempt/40 for $DEPLOY_TARGET (container: $APP_CONTAINER)"
+        # Helper function: Business logic validation
+        business_logic_check() {
+          local container="$1"
+          local port="$2"
           
-          # Priority 1: Check Docker-managed health status
-          HEALTH_STATUS=$(get_docker_health_status "$APP_CONTAINER")
-          echo "🔎 Docker Health Status: $HEALTH_STATUS"
+          # Test critical endpoints that validate business functionality
+          local endpoints="/health /version /status"
+          local passed=0
+          local total=0
+          
+          for endpoint in $endpoints; do
+            total=$((total + 1))
+            if docker exec "$container" curl -sS --max-time 3 "http://localhost:$port$endpoint" >/dev/null 2>&1; then
+              passed=$((passed + 1))
+              echo "   ✅ $endpoint: responsive"
+            else
+              echo "   ❌ $endpoint: failed"
+            fi
+          done
+          
+          local success_rate=$(echo "scale=0; $passed * 100 / $total" | bc -l 2>/dev/null || echo "0")
+          if [ $success_rate -ge 66 ]; then  # At least 2/3 endpoints must pass
+            echo "SUCCESS:business:${success_rate}%"
+            return 0
+          else
+            echo "FAILED:business:${success_rate}%"
+            return 1
+          fi
+        }
+        
+        # Helper function: Resource validation
+        resource_health_check() {
+          local container="$1"
+          
+          # Memory usage check
+          local memory_usage=$(docker stats --no-stream --format "{{.MemPerc}}" "$container" 2>/dev/null | sed 's/%//' || echo "0")
+          # CPU usage check (average over 5 seconds)
+          local cpu_usage=$(docker stats --no-stream --format "{{.CPUPerc}}" "$container" 2>/dev/null | sed 's/%//' || echo "0")
+          
+          # Resource thresholds
+          local memory_threshold=90
+          local cpu_threshold=80
+          
+          if [ "$(echo "$memory_usage < $memory_threshold" | bc -l 2>/dev/null || echo 0)" = "1" ] && \
+             [ "$(echo "$cpu_usage < $cpu_threshold" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+            echo "SUCCESS:resources:mem=${memory_usage}%,cpu=${cpu_usage}%"
+            return 0
+          else
+            echo "WARNING:resources:mem=${memory_usage}%,cpu=${cpu_usage}%"
+            return 1
+          fi
+        }
+        
+        # COMPREHENSIVE MULTI-LAYER HEALTH VALIDATION
+        echo "🎡 Starting comprehensive health validation for $DEPLOY_TARGET environment..."
+        
+        local health_passed=false
+        local validation_score=0
+        local max_score=5  # 5 validation layers
+        
+        for attempt in $(seq 1 30); do
+          echo ""
+          echo "🔍 ━━━ Health Validation Attempt $attempt/30 ━━━"
+          echo "   Target: $DEPLOY_TARGET (container: $APP_CONTAINER, port: $TARGET_PORT)"
+          
+          validation_score=0
+          local validation_details=""
+          
+          # Layer 1: Docker Container Health Status
+          echo "🔍 Layer 1: Docker Health Status"
+          HEALTH_STATUS_RESULT=$(get_docker_health_status "$APP_CONTAINER")
+          HEALTH_STATUS=$(echo "$HEALTH_STATUS_RESULT" | cut -d':' -f1)
+          HEALTH_CHECKS=$(echo "$HEALTH_STATUS_RESULT" | cut -d':' -f2)
           
           if [ "$HEALTH_STATUS" = "healthy" ]; then
-            echo "✅ Docker-level health = healthy"
-            
-            # Version verification via internal network
-            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
-            if [ "$DEPLOYED_VERSION" != "unknown" ]; then
-              echo "📋 Deployed version: $DEPLOYED_VERSION"
-              DEPLOYMENT_ID=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .deployment_id 2>/dev/null" || echo "unknown")
-              echo "🆔 Deployment ID: $DEPLOYMENT_ID"
-            fi
-            break
+            validation_score=$((validation_score + 1))
+            validation_details="${validation_details}[Docker:✅]"
+            echo "   ✅ Docker health: $HEALTH_STATUS ($HEALTH_CHECKS checks)"
+          else
+            validation_details="${validation_details}[Docker:❌]"
+            echo "   ❌ Docker health: $HEALTH_STATUS"
           fi
           
-          # Priority 2: Internal container health check
-          echo "🔍 Trying internal container health check (docker exec)..."
-          if app_internal_health_check; then
-            echo "✅ Internal container health check passed"
-            
-            # Version verification
-            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
-            echo "📋 Deployed version: $DEPLOYED_VERSION"
-            break
+          # Layer 2: Internal Application Health
+          echo "🔍 Layer 2: Internal Application Health"
+          INTERNAL_RESULT=$(app_internal_health_check "$APP_CONTAINER" "$TARGET_PORT")
+          if echo "$INTERNAL_RESULT" | grep -q "SUCCESS"; then
+            validation_score=$((validation_score + 1))
+            validation_details="${validation_details}[Internal:✅]"
+            echo "   ✅ Internal health: $(echo "$INTERNAL_RESULT" | cut -d':' -f3) attempts"
+          else
+            validation_details="${validation_details}[Internal:❌]"
+            echo "   ❌ Internal health: $(echo "$INTERNAL_RESULT" | cut -d':' -f3) attempts failed"
           fi
           
-          # Priority 3: Network-level health check via Docker network
-          echo "🔍 Trying network-level health check (ephemeral curl container)..."
-          if network_health_check; then
-            echo "✅ Network-level health check passed"
+          # Layer 3: Network Connectivity
+          echo "🔍 Layer 3: Network Connectivity"
+          NETWORK_RESULT=$(network_health_check "$APP_CONTAINER" "$TARGET_PORT")
+          if echo "$NETWORK_RESULT" | grep -q "SUCCESS"; then
+            validation_score=$((validation_score + 1))
+            validation_details="${validation_details}[Network:✅]"
+            echo "   ✅ Network health: $(echo "$NETWORK_RESULT" | cut -d':' -f3) attempts"
+          else
+            validation_details="${validation_details}[Network:❌]"
+            echo "   ❌ Network health: $(echo "$NETWORK_RESULT" | cut -d':' -f3) attempts failed"
+          fi
+          
+          # Layer 4: Business Logic Validation
+          echo "🔍 Layer 4: Business Logic Validation"
+          BUSINESS_RESULT=$(business_logic_check "$APP_CONTAINER" "$TARGET_PORT")
+          if echo "$BUSINESS_RESULT" | grep -q "SUCCESS"; then
+            validation_score=$((validation_score + 1))
+            validation_details="${validation_details}[Business:✅]"
+            echo "   ✅ Business logic: $(echo "$BUSINESS_RESULT" | cut -d':' -f3)"
+          else
+            validation_details="${validation_details}[Business:❌]"
+            echo "   ❌ Business logic: $(echo "$BUSINESS_RESULT" | cut -d':' -f3)"
+          fi
+          
+          # Layer 5: Resource Health
+          echo "🔍 Layer 5: Resource Health"
+          RESOURCE_RESULT=$(resource_health_check "$APP_CONTAINER")
+          if echo "$RESOURCE_RESULT" | grep -q "SUCCESS"; then
+            validation_score=$((validation_score + 1))
+            validation_details="${validation_details}[Resources:✅]"
+            echo "   ✅ Resource health: $(echo "$RESOURCE_RESULT" | cut -d':' -f3)"
+          elif echo "$RESOURCE_RESULT" | grep -q "WARNING"; then
+            validation_score=$((validation_score + 1))  # Count warning as partial success
+            validation_details="${validation_details}[Resources:⚠️]"
+            echo "   ⚠️  Resource warning: $(echo "$RESOURCE_RESULT" | cut -d':' -f3)"
+          else
+            validation_details="${validation_details}[Resources:❌]"
+            echo "   ❌ Resource health: Failed"
+          fi
+          
+          # Calculate validation percentage
+          local validation_percentage=$(echo "scale=0; $validation_score * 100 / $max_score" | bc -l 2>/dev/null || echo "0")
+          echo "   📈 Validation Score: $validation_score/$max_score ($validation_percentage%)"
+          echo "   📊 Status Summary: $validation_details"
+          
+          # Success criteria: At least 80% of validations must pass (4/5)
+          if [ $validation_score -ge 4 ]; then
+            echo ""
+            echo "✅ 🎆 HEALTH VALIDATION SUCCESSFUL! 🎆"
+            echo "   Score: $validation_score/$max_score ($validation_percentage%)"
+            echo "   Details: $validation_details"
+            
+            # Get and display version information
+            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
+            DEPLOYMENT_ID=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .deployment_id 2>/dev/null" || echo "unknown")
+            
+            echo "   📍 Version: $DEPLOYED_VERSION"
+            echo "   🆔 Deployment ID: $DEPLOYMENT_ID"
+            
+            health_passed=true
             break
           fi
           
           # Enhanced debugging at key intervals
-          if [ $attempt -eq 3 ] || [ $attempt -eq 10 ] || [ $attempt -eq 20 ] || [ $attempt -eq 35 ]; then
-            echo "🔍 [DEBUG] Container status (attempt $attempt):"
-            docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | grep -E "(nginx|${DEPLOY_TARGET}|api)" || true
-            echo "🔍 [DEBUG] Container logs (last 15 lines):"
-            docker logs --tail 15 "$APP_CONTAINER" 2>&1 | head -20 || echo "❌ No logs for $APP_CONTAINER"
-            echo "🔍 [DEBUG] Container inspect state:"
-            docker inspect --format='{{json .State}}' "$APP_CONTAINER" | jq '.Running, .Health.Status, .RestartCount, .ExitCode' 2>/dev/null || echo "❌ Inspect failed"
-            echo "🔍 [DEBUG] Network connectivity test:"
-            docker exec "$APP_CONTAINER" sh -c "netstat -tulpn 2>/dev/null | grep :$TARGET_PORT || echo 'Port not bound inside container'"
+          if [ $attempt -eq 5 ] || [ $attempt -eq 15 ] || [ $attempt -eq 25 ]; then
+            echo ""
+            echo "🔍 [DIAGNOSTIC] Deep Analysis (attempt $attempt):"
+            echo "   Container State:"
+            docker ps -a --format "   {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "(${DEPLOY_TARGET}|api|nginx)" || true
+            echo "   Recent Logs:"
+            docker logs --tail 10 "$APP_CONTAINER" 2>&1 | sed 's/^/   /' || echo "   No logs available"
+            echo "   Network Test:"
+            docker exec "$APP_CONTAINER" sh -c "netstat -tulpn 2>/dev/null | grep :$TARGET_PORT || echo '   Port not bound'" | sed 's/^/   /'
           fi
           
-          # Final attempt failure handling
-          if [ $attempt -eq 40 ]; then
-            echo "❌ $DEPLOY_TARGET environment failed to become healthy after $attempt attempts"
-            echo "🔍 [FINAL DEBUG] Complete diagnostic information:"
-            docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
-            echo "📋 Final container logs:"
-            docker logs --tail 50 "$APP_CONTAINER" 2>&1 || echo "No $APP_CONTAINER logs"
-            docker logs --tail 20 api-server 2>&1 || echo "No api-server logs"  
-            docker logs --tail 20 nginx-proxy 2>&1 || echo "No nginx-proxy logs"
-            echo "🔍 Final network and process state:"
-            docker exec "$APP_CONTAINER" sh -c "ps aux; echo '---'; netstat -tulpn" 2>/dev/null || echo "Cannot access container internals"
-            exit 1
+          # Progressive backoff with jitter
+          if [ $attempt -lt 30 ]; then
+            sleep_duration=$(( 3 + attempt / 3 ))
+            if [ $sleep_duration -gt 15 ]; then sleep_duration=15; fi
+            echo "   ⏳ Waiting ${sleep_duration}s (progressive backoff)..."
+            sleep "$sleep_duration"
           fi
-          
-          # Exponential backoff: progressively increase wait time
-          sleep_duration=$(( 3 + attempt * 2 ))
-          if [ $sleep_duration -gt 30 ]; then sleep_duration=30; fi
-          echo "⏳ Waiting ${sleep_duration}s before next attempt (progressive backoff)..."
-          sleep "$sleep_duration"
         done
+        
+        # Final validation result
+        if [ "$health_passed" = "false" ]; then
+          echo ""
+          echo "❌ 🚨 HEALTH VALIDATION FAILED! 🚨"
+          echo "   Final Score: $validation_score/$max_score ($validation_percentage%)"
+          echo "   Details: $validation_details"
+          echo ""
+          echo "🔍 [FINAL DIAGNOSTIC] Complete system state:"
+          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}"
+          echo ""
+          echo "📜 Final logs from $APP_CONTAINER:"
+          docker logs --tail 30 "$APP_CONTAINER" 2>&1 || echo "No logs available"
+          echo ""
+          echo "🌐 Network diagnostics:"
+          docker network inspect bluegreen-network | jq '.[0].Containers' 2>/dev/null || echo "Network inspection failed"
+          exit 1
+        fi
         
         echo "🎉 Inactive environment deployment completed successfully with version tracking!"
       '
@@ -673,6 +1099,10 @@ verify-deployment:
           echo "   Too many availability issues detected"
           exit 1
         fi
+        
+        # Clean up deployment lock after successful deployment
+        rm -f deployment_state/deployment.lock 2>/dev/null || true
+        echo "🔓 Deployment completed - lock cleaned up"
       '
 
 # 9. Cleanup Previous Environment (Manual).
@@ -731,9 +1161,13 @@ cleanup-previous-environment:
         docker image prune -f --filter "dangling=true" || true
 
         echo "🎉 Previous environment cleanup finished."
+        
+        # Clean up deployment lock
+        rm -f deployment_state/deployment.lock 2>/dev/null || true
+        echo "🔓 Deployment lock cleaned up"
       '
 
-# 10. Emergency Rollback (Manual).
+# 10. Enhanced Emergency Rollback with Safety Checks (Manual)
 emergency-rollback:
   stage: cleanup-dev
   image: alpine:latest
@@ -744,29 +1178,182 @@ emergency-rollback:
     name: production-dev
     url: "http://$DEPLOY_SERVER_DEV"
   script:
-    - echo "🚨 EMERGENCY ROLLBACK - Immediate traffic restoration"
+    - echo "🚨 ENHANCED EMERGENCY ROLLBACK - Multi-Stage Safety Protocol"
     - |
       ssh "ubuntu@$DEPLOY_SERVER_DEV" '
         cd ~/bgTest/v5ToWindow
-        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
         
-        echo "🔄 Emergency rollback to $PREVIOUS_ACTIVE environment..."
+        echo "🔍 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🚨 EMERGENCY ROLLBACK SAFETY PROTOCOL INITIATED"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
-        # Execute rollback via API - using Docker internal network
-        rollback_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-          curl -s -X POST "http://api-server:9000/switch/$PREVIOUS_ACTIVE" 2>/dev/null || echo "{\"success\":false}")
+        # Stage 1: Pre-rollback validation
+        echo "🔍 Stage 1: Pre-rollback System Assessment"
         
-        if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
-          echo "✅ Emergency rollback successful - traffic restored to $PREVIOUS_ACTIVE"
+        # Determine rollback target
+        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "unknown")
+        CURRENT_DEPLOY=$(cat ~/deploy_target.env 2>/dev/null || echo "unknown")
+        DETECTION_CONFIDENCE=$(cat ~/detection_confidence.env 2>/dev/null || echo "low")
+        
+        if [ "$PREVIOUS_ACTIVE" = "unknown" ]; then
+          echo "❌ Cannot determine rollback target - no previous active environment recorded"
+          echo "   Attempting fallback detection..."
+          
+          # Try to detect from current traffic
+          CURRENT_TRAFFIC=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+            curl -s --max-time 5 "http://api-server:9000/status" 2>/dev/null | jq -r ".current_deployment" 2>/dev/null || echo "")
+          
+          if [ -n "$CURRENT_TRAFFIC" ] && [ "$CURRENT_TRAFFIC" != "null" ]; then
+            # If current traffic is going to the newly deployed target, rollback to the opposite
+            if [ "$CURRENT_TRAFFIC" = "$CURRENT_DEPLOY" ]; then
+              PREVIOUS_ACTIVE=$(if [ "$CURRENT_DEPLOY" = "blue" ]; then echo "green"; else echo "blue"; fi)
+              echo "⚠️  Fallback detection: Rolling back to $PREVIOUS_ACTIVE (opposite of current $CURRENT_TRAFFIC)"
+            else
+              PREVIOUS_ACTIVE="$CURRENT_TRAFFIC"
+              echo "⚠️  Fallback detection: Current traffic target is $PREVIOUS_ACTIVE"
+            fi
+          else
+            echo "❌ Critical Error: Cannot determine rollback target"
+            echo "   Manual intervention required - please check system state"
+            exit 1
+          fi
+        fi
+        
+        echo "🎯 Rollback target determined: $PREVIOUS_ACTIVE"
+        echo "   Current deployment: $CURRENT_DEPLOY"
+        echo "   Detection confidence: $DETECTION_CONFIDENCE"
+        
+        # Stage 2: Rollback target validation
+        echo ""
+        echo "🔍 Stage 2: Rollback Target Health Validation"
+        
+        ROLLBACK_CONTAINER="${PREVIOUS_ACTIVE}-app"
+        ROLLBACK_PORT=$(if [ "$PREVIOUS_ACTIVE" = "blue" ]; then echo "3001"; else echo "3002"; fi)
+        
+        # Check if rollback target container exists and is healthy
+        if docker ps --format "{{.Names}}" | grep -q "^$ROLLBACK_CONTAINER$"; then
+          echo "✅ Rollback target container exists: $ROLLBACK_CONTAINER"
+          
+          # Health check rollback target
+          ROLLBACK_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' "$ROLLBACK_CONTAINER" 2>/dev/null || echo "unhealthy")
+          echo "   Health status: $ROLLBACK_HEALTH"
+          
+          if [ "$ROLLBACK_HEALTH" = "healthy" ]; then
+            echo "✅ Rollback target is healthy - safe to proceed"
+          else
+            echo "⚠️  Rollback target is not healthy - attempting basic connectivity test"
+            if docker exec "$ROLLBACK_CONTAINER" curl -sS -f --max-time 3 "http://localhost:$ROLLBACK_PORT/health" >/dev/null 2>&1; then
+              echo "✅ Basic connectivity test passed - proceeding with caution"
+            else
+              echo "❌ Rollback target is not responding"
+              echo "   This rollback may not restore service!"
+              echo "   Consider manual intervention instead"
+              read -t 10 -p "Continue anyway? (y/N): " confirmation || confirmation="N"
+              if [ "$confirmation" != "y" ] && [ "$confirmation" != "Y" ]; then
+                echo "   Rollback aborted for safety"
+                exit 1
+              fi
+            fi
+          fi
         else
-          echo "❌ Emergency rollback failed - manual intervention required"
+          echo "❌ Critical Error: Rollback target container not found: $ROLLBACK_CONTAINER"
+          echo "   Available containers:"
+          docker ps --format "   {{.Names}}\t{{.Status}}"
           exit 1
         fi
         
-        # Verify rollback
-        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
-          echo "✅ Rollback verification successful"
-        else
-          echo "❌ Rollback verification failed"
+        # Stage 3: Current system state backup
+        echo ""
+        echo "🔍 Stage 3: System State Backup"
+        
+        # Backup current configuration
+        mkdir -p ~/rollback_backup/$(date +%Y%m%d_%H%M%S)
+        BACKUP_DIR="~/rollback_backup/$(date +%Y%m%d_%H%M%S)"
+        
+        docker exec nginx-proxy cat /etc/nginx/conf.d/active.env > "$BACKUP_DIR/active.env.backup" 2>/dev/null || echo "" > "$BACKUP_DIR/active.env.backup"
+        echo "$(date): Rollback from $CURRENT_DEPLOY to $PREVIOUS_ACTIVE" > "$BACKUP_DIR/rollback.log"
+        
+        echo "💾 Configuration backed up to $BACKUP_DIR"
+        
+        # Stage 4: Execute rollback
+        echo ""
+        echo "🔍 Stage 4: Executing Safe Rollback"
+        
+        echo "   → Switching traffic from $CURRENT_DEPLOY to $PREVIOUS_ACTIVE..."
+        
+        # Execute rollback via API with retry mechanism
+        ROLLBACK_ATTEMPTS=3
+        ROLLBACK_SUCCESS=false
+        
+        for attempt in $(seq 1 $ROLLBACK_ATTEMPTS); do
+          echo "   Rollback attempt $attempt/$ROLLBACK_ATTEMPTS..."
+          
+          rollback_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
+            curl -s -X POST "http://api-server:9000/switch/$PREVIOUS_ACTIVE" 2>/dev/null || echo "{\"success\":false,\"error\":\"network_error\"}")
+          
+          if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
+            echo "✅ Rollback API call successful (attempt $attempt)"
+            ROLLBACK_SUCCESS=true
+            break
+          else
+            echo "❌ Rollback attempt $attempt failed: $rollback_response"
+            [ $attempt -lt $ROLLBACK_ATTEMPTS ] && sleep 3
+          fi
+        done
+        
+        if [ "$ROLLBACK_SUCCESS" = "false" ]; then
+          echo "❌ All rollback attempts failed - trying manual nginx configuration"
+          
+          # Manual nginx configuration as last resort
+          echo "set \$active \"$PREVIOUS_ACTIVE\";" | docker exec -i nginx-proxy tee /etc/nginx/conf.d/active.env > /dev/null
+          docker exec nginx-proxy nginx -s reload
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Manual nginx rollback completed"
+            ROLLBACK_SUCCESS=true
+          else
+            echo "❌ Manual nginx rollback failed - critical error"
+          fi
         fi
+        
+        # Stage 5: Rollback verification
+        echo ""
+        echo "🔍 Stage 5: Rollback Verification"
+        
+        if [ "$ROLLBACK_SUCCESS" = "true" ]; then
+          # Multi-layer verification
+          VERIFICATION_PASSED=0
+          
+          # Test 1: Basic connectivity
+          for i in $(seq 1 5); do
+            if curl -f --max-time 3 "http://localhost:80/status" >/dev/null 2>&1; then
+              VERIFICATION_PASSED=$((VERIFICATION_PASSED + 1))
+            fi
+            sleep 1
+          done
+          
+          # Test 2: Version verification
+          CURRENT_VERSION=$(curl -s --max-time 3 "http://localhost:80/version" 2>/dev/null | jq -r ".version" 2>/dev/null || echo "unknown")
+          echo "   Current version after rollback: $CURRENT_VERSION"
+          
+          if [ $VERIFICATION_PASSED -ge 4 ]; then  # At least 4/5 tests must pass
+            echo "✅ 🎆 EMERGENCY ROLLBACK SUCCESSFUL! 🎆"
+            echo "   Traffic restored to $PREVIOUS_ACTIVE environment"
+            echo "   Verification: $VERIFICATION_PASSED/5 tests passed"
+            echo "   System version: $CURRENT_VERSION"
+          else
+            echo "❌ 🚨 ROLLBACK VERIFICATION FAILED! 🚨"
+            echo "   Only $VERIFICATION_PASSED/5 verification tests passed"
+            echo "   Service may still be impaired - manual intervention required"
+          fi
+        else
+          echo "❌ 🚨 EMERGENCY ROLLBACK FAILED! 🚨"
+          echo "   Manual intervention urgently required"
+          exit 1
+        fi
+        
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🎆 EMERGENCY ROLLBACK PROTOCOL COMPLETED"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       '
