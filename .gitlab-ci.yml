@@ -1,772 +1,562 @@
----
-# True Blue-Green Deployment CI/CD Pipeline
-# Implements zero-downtime deployment with separated container architecture
-
-default:
-  tags:
-#        - mac-mini
-#    - home-runner
-    - notebook
+# GitLab CI/CD + AWS CodeDeploy Hybrid Pipeline
+# Migrates from single EC2 Docker to dual EC2 + AWS ALB architecture
+# Version: 2.0 - Enhanced for ALB integration
 
 stages:
-  - build-dev
-  - test-dev
-  - detect-env-dev
-  - deploy-inactive-dev
-  - health-check-dev
-  - zero-downtime-test-dev
-  - switch-traffic-dev
-  - verify-deployment-dev
-  - cleanup-dev
+  - build
+  - test
+  - package
+  - deploy-staging    # GitLab direct deployment (compatibility)
+  - deploy-production # CodeDeploy integration (new approach)
+  - switch-traffic    # ALB traffic switching
+  - validate
+  - rollback
 
-# Common variables
 variables:
-  GIT_DEPTH: "0"
-#  CI_DEBUG_TRACE: "true"  # 상세 디버그 로그 활성화
-  NODE_OPTIONS: "--max_old_space_size=2048"
+  # Deployment strategy control
+  DEPLOYMENT_STRATEGY: "hybrid"  # hybrid | codedeploy-only | gitlab-only
+  
+  # Application configuration
+  APPLICATION_NAME: "bluegreen-app"
+  APPLICATION_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  
+  # AWS Configuration
+  AWS_DEFAULT_REGION: "us-east-1"
+  CODEDEPLOY_APPLICATION_NAME: "bluegreen-deployment-production-app"
+  CODEDEPLOY_S3_BUCKET: "bluegreen-codedeploy-artifacts"
+  
+  # Target Group Configuration
+  BLUE_TARGET_GROUP: "bluegreen-deployment-production-blue-tg"
+  GREEN_TARGET_GROUP: "bluegreen-deployment-production-green-tg"
+  ALB_LISTENER_ARN: "${ALB_LISTENER_ARN}"
+  
+  # Environment versions
+  BLUE_VERSION: "${BLUE_VERSION:-1.0.0}"
+  GREEN_VERSION: "${GREEN_VERSION:-1.0.0}"
+  DEPLOYMENT_VERSION: "${APPLICATION_VERSION}"
+  
+  # Docker configuration (for backwards compatibility)
   DOCKER_DRIVER: overlay2
-  COMPOSE_FILE: "docker-compose.yml"
-  # Dynamic versioning support
-  BLUE_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
-  GREEN_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
-  DEPLOYMENT_VERSION: "${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+  DOCKER_TLS_CERTDIR: "/certs"
 
-# Reusable rules
-.rules_dev_and_main: &rules_dev_main
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-    - if: '$CI_COMMIT_BRANCH == "main"'
-    - when: never
-
-# Reusable SSH setup
-.ssh_setup: &ssh_setup
-  before_script:
-    - apk add --no-cache bash openssh-client curl jq docker docker-compose
-    - eval $(ssh-agent -s)
-    - echo "🔍 Validating CI/CD Variables..."
+# Build stage - Universal for all deployment strategies
+build:
+  stage: build
+  image: node:18-alpine
+  cache:
+    paths:
+      - node_modules/
+  script:
+    - echo "Building application version ${APPLICATION_VERSION}..."
     - |
-      if [ -z "$AWS_PEM_DEV" ] || [ -z "$DEPLOY_SERVER_DEV" ]; then
-        echo "❌ ERROR: Required CI/CD variables not configured"
-        echo "Required: AWS_PEM_DEV (File), DEPLOY_SERVER_DEV (Variable)"
+      # Create package.json if it doesn't exist
+      if [ ! -f "package.json" ]; then
+        cat > package.json << 'EOF'
+      {
+        "name": "bluegreen-app",
+        "version": "1.0.0",
+        "description": "Blue-Green Deployment Application",
+        "main": "app-server/app.js",
+        "scripts": {
+          "start": "node app-server/app.js",
+          "pm2": "pm2 start ecosystem.config.js",
+          "health": "curl http://localhost:3001/health/deep"
+        },
+        "dependencies": {},
+        "engines": {
+          "node": ">=16.0.0"
+        }
+      }
+      EOF
+      fi
+    - npm ci --only=production
+    - echo "Build completed successfully"
+  artifacts:
+    paths:
+      - node_modules/
+      - app-server/
+      - ecosystem.config.js
+      - nginx-alb.conf
+      - conf.d/
+      - scripts/
+      - appspec.yml
+    expire_in: 1 hour
+
+# Test stage - Syntax and basic validation
+test:
+  stage: test
+  image: node:18-alpine
+  dependencies:
+    - build
+  script:
+    - echo "Running tests and validation..."
+    - |
+      # Test Node.js syntax
+      node -c app-server/app.js
+      
+      # Test ecosystem configuration syntax
+      node -e "require('./ecosystem.config.js'); console.log('✅ Ecosystem config is valid')"
+      
+      # Test appspec.yml syntax
+      if command -v python3 &> /dev/null; then
+        python3 -c "import yaml; yaml.safe_load(open('appspec.yml')); print('✅ AppSpec YAML is valid')"
+      fi
+      
+      echo "All tests passed"
+
+# Package stage - Create deployment artifacts
+package:
+  stage: package
+  image: alpine:latest
+  dependencies:
+    - build
+  before_script:
+    - apk add --no-cache zip aws-cli
+  script:
+    - echo "Creating deployment package..."
+    - |
+      # Create deployment metadata
+      cat > deployment-metadata.json << EOF
+      {
+        "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "commit_hash": "${CI_COMMIT_SHA}",
+        "commit_short_sha": "${CI_COMMIT_SHORT_SHA}",
+        "branch": "${CI_COMMIT_REF_NAME}",
+        "pipeline_id": "${CI_PIPELINE_ID}",
+        "job_id": "${CI_JOB_ID}",
+        "version": "${APPLICATION_VERSION}",
+        "deployment_strategy": "${DEPLOYMENT_STRATEGY}"
+      }
+      EOF
+      
+      # Create CodeDeploy deployment package
+      zip -r "deployment-${APPLICATION_VERSION}.zip" \
+        app-server/ \
+        ecosystem.config.js \
+        nginx-alb.conf \
+        conf.d/ \
+        scripts/ \
+        appspec.yml \
+        deployment-metadata.json \
+        -x "*.git*" "*.DS_Store" "node_modules/.*"
+      
+      echo "Package created: deployment-${APPLICATION_VERSION}.zip"
+      ls -la *.zip
+  artifacts:
+    paths:
+      - "deployment-*.zip"
+      - deployment-metadata.json
+    expire_in: 1 day
+
+# Staging deployment - GitLab direct (backwards compatibility)
+deploy-to-staging:
+  stage: deploy-staging
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: staging
+  before_script:
+    - apk add --no-cache openssh-client curl
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H "$STAGING_SERVER" >> ~/.ssh/known_hosts
+  script:
+    - echo "Deploying to staging environment using GitLab method..."
+    - |
+      if [ "$DEPLOYMENT_STRATEGY" != "codedeploy-only" ]; then
+        echo "Using traditional GitLab deployment for staging"
+      
+        # Deploy to staging server
+        scp "deployment-${APPLICATION_VERSION}.zip" ec2-user@${STAGING_SERVER}:/tmp/
+      
+        ssh ec2-user@${STAGING_SERVER} << 'ENDSSH'
+          set -e
+      
+          # Extract deployment package
+          cd /opt/bluegreen-app-staging
+          unzip -o /tmp/deployment-*.zip
+      
+          # Update PM2 processes
+          ./scripts/manage-pm2.sh restart --env staging --group blue
+      
+          # Wait for health check
+          sleep 10
+          ./scripts/manage-pm2.sh health
+      
+          echo "Staging deployment completed"
+  ENDSSH
+  
+  echo "Staging deployment completed successfully"
+  else
+echo "CodeDeploy-only mode: skipping GitLab staging deployment"
+  fi
+environment:
+  name: staging
+  url: http://${STAGING_SERVER}
+when: manual
+only:
+  - develop
+  - feature/*
+
+# Production deployment - Blue environment via CodeDeploy
+deploy-to-blue-production:
+  stage: deploy-production
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: production
+    DEPLOYMENT_GROUP: blue
+    TARGET_GROUP: "${BLUE_TARGET_GROUP}"
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+    - aws --version
+  script:
+    - echo "Deploying to Blue production environment via CodeDeploy..."
+    - |
+      # Upload deployment package to S3
+      S3_KEY="production/deployment-${APPLICATION_VERSION}-${CI_PIPELINE_ID}.zip"
+      aws s3 cp "deployment-${APPLICATION_VERSION}.zip" "s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      echo "Package uploaded to S3: s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      
+      # Create CodeDeploy deployment
+      DEPLOYMENT_ID=$(aws deploy create-deployment \
+        --application-name "${CODEDEPLOY_APPLICATION_NAME}" \
+        --deployment-group-name "${CODEDEPLOY_APPLICATION_NAME}-blue-dg" \
+        --s3-location bucket="${CODEDEPLOY_S3_BUCKET}",key="${S3_KEY}",bundleType=zip \
+        --description "GitLab Pipeline: ${CI_PIPELINE_ID}, Commit: ${CI_COMMIT_SHORT_SHA}" \
+        --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
+        --query 'deploymentId' \
+        --output text)
+      
+      echo "CodeDeploy deployment created: $DEPLOYMENT_ID"
+      echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" > codedeploy_deployment.env
+      
+      # Wait for deployment to complete
+      echo "Waiting for deployment to complete..."
+      aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+      
+      # Check deployment status
+      STATUS=$(aws deploy get-deployment \
+        --deployment-id "$DEPLOYMENT_ID" \
+        --query 'deploymentInfo.status' \
+        --output text)
+      
+      if [ "$STATUS" = "Succeeded" ]; then
+        echo "✅ Blue production deployment completed successfully"
+      
+        # Get deployment summary
+        aws deploy get-deployment \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --query 'deploymentInfo' \
+          --output table
+      
+      else
+        echo "❌ Blue production deployment failed with status: $STATUS"
+      
+        # Get failure details
+        aws deploy list-deployment-instances \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --query 'instancesList[?status==`Failed`]' \
+          --output table
         exit 1
       fi
-    - chmod 600 "$AWS_PEM_DEV"
-    - ssh-add "$AWS_PEM_DEV"
-    - mkdir -p ~/.ssh
-    - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
-    - echo "✅ SSH setup completed"
-
-# 1. Build Stage
-build-dev:
-  stage: build-dev
-  image: node:18-alpine
-  <<: *rules_dev_main
-  script:
-    - echo "🏗️  Building Blue-Green unified architecture with version ${DEPLOYMENT_VERSION}..."
-    - cp "$DEV_ENV_FILE" ./.env || echo "No env file configured"
-    - echo "VERSION=${DEPLOYMENT_VERSION}" >> ./.env
-    - echo "📦 Preparing artifacts for unified container deployment..."
-    - echo "🔧 Version configuration:"
-    - echo "   BLUE_VERSION=${BLUE_VERSION}"
-    - echo "   GREEN_VERSION=${GREEN_VERSION}"
-    - echo "   DEPLOYMENT_VERSION=${DEPLOYMENT_VERSION}"
-    - ls -la app-service/ api-service/ monitoring/ app-server/ || echo "Service directories ready"
   artifacts:
-    expire_in: 3 days
+    reports:
+      dotenv: codedeploy_deployment.env
     paths:
-      - ./app-service/
-      - ./api-service/
-      - ./monitoring/
-      - ./scripts/
-      - ./app-server/
-      - ./nginx.conf
-      - ./conf.d/
-      - ./admin.html
-      - ./docker-compose.yml
-      - ./.env
-
-# 2. Test Stage
-test-dev:
-  stage: test-dev
-  image: node:18-alpine
-  <<: *rules_dev_main
-  needs: ["build-dev"]
-  script:
-    - echo "🧪 Testing unified services architecture (True Blue-Green Pattern)..."
-    - node -c app-server/app.js
-    - node -c api-server/app.js
-    - echo "✅ All service syntax checks passed - Single codebase architecture"
-
-# 3. Environment Detection
-detect-active-environment:
-  stage: detect-env-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["build-dev", "test-dev"]
-  script:
-#    - set -x  # 모든 명령어 출력
-    - echo "🔍 Detecting current active environment..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        echo "📊 Environment Detection:"
-        
-        # Enhanced environment detection with API fallback
-        echo "🔍 Detecting current environment with multiple methods..."
-        
-        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
-          echo "✅ Blue-Green system is running"
-          
-          # Try API-based detection first (more reliable) - using Docker internal network
-          API_RESPONSE=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-            curl -s --max-time 5 "http://api-server:9000/status" 2>/dev/null || echo "")
-          API_ACTIVE=$(echo "$API_RESPONSE" | jq -r ".current_deployment" 2>/dev/null || echo "")
-          
-          # Fallback to file-based detection
-          FILE_ACTIVE=$(docker exec nginx-proxy cat /etc/nginx/conf.d/active.env | grep -o "blue\|green" 2>/dev/null || echo "")
-          
-          # Choose the most reliable source
-          if [ -n "$API_ACTIVE" ] && [ "$API_ACTIVE" != "null" ]; then
-            CURRENT_ACTIVE="$API_ACTIVE"
-            echo "📊 Using API-detected environment: $CURRENT_ACTIVE"
-          elif [ -n "$FILE_ACTIVE" ]; then
-            CURRENT_ACTIVE="$FILE_ACTIVE"
-            echo "📄 Using file-detected environment: $CURRENT_ACTIVE"
-          else
-            CURRENT_ACTIVE="blue"
-            echo "⚠️  No reliable detection, defaulting to: $CURRENT_ACTIVE"
-          fi
-          
-          # True Blue-Green deployment: Deploy to inactive environment
-          if [ "$CURRENT_ACTIVE" = "blue" ]; then
-            DEPLOY_TARGET="green"
-            echo "🔵→🟢 Current: blue, Deploying to: green"
-          else
-            DEPLOY_TARGET="blue"
-            echo "🟢→🔵 Current: green, Deploying to: blue"
-          fi
-        else
-          echo "⚠️  System not running, defaulting to green deployment"
-          CURRENT_ACTIVE="blue"
-          DEPLOY_TARGET="green"
-        fi
-        
-        echo "Current active: $CURRENT_ACTIVE"
-        echo "Deploy target: $DEPLOY_TARGET"
-        
-        # Save environment info
-        echo "$CURRENT_ACTIVE" > ~/current_active.env
-        echo "$DEPLOY_TARGET" > ~/deploy_target.env
-      '
-
-# 4. Deploy to Inactive Environment ONLY (ZERO DOWNTIME).
-deploy-to-inactive-environment:
-  stage: deploy-inactive-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["detect-active-environment"]
+      - codedeploy_deployment.env
+    expire_in: 1 day
   environment:
-    name: inactive-env
-    url: "http://$DEPLOY_SERVER_DEV"
+    name: production-blue
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Production deployment - Green environment via CodeDeploy
+deploy-to-green-production:
+  stage: deploy-production
+  image: alpine:latest
+  dependencies:
+    - package
+  variables:
+    ENVIRONMENT: production
+    DEPLOYMENT_GROUP: green
+    TARGET_GROUP: "${GREEN_TARGET_GROUP}"
+  before_script:
+    - apk add --no-cache aws-cli curl jq
   script:
-    - echo "🚀 TRUE BLUE-GREEN DEPLOYMENT - Deploy to inactive environment only"
-    - echo "📁 Transferring unified service architecture..."
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow"
-    - scp -r ./app-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./api-service/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./api-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./monitoring/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp -r ./app-server/ "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - ssh "ubuntu@$DEPLOY_SERVER_DEV" "mkdir -p ~/bgTest/v5ToWindow/conf.d"
-    - scp ./conf.d/upstreams.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/conf.d/"
-    - scp ./conf.d/routing.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/conf.d/"
-    - scp ./docker-compose.yml "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./nginx.conf "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./admin.html "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/"
-    - scp ./.env "ubuntu@$DEPLOY_SERVER_DEV:~/bgTest/v5ToWindow/" || echo "No .env file found, using defaults"
-    - echo "🐳 Deploying ONLY to inactive environment (maintaining zero downtime)..."
+    - echo "Deploying to Green production environment via CodeDeploy..."
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        
-        # True Blue-Green deployment: Deploy to inactive environment
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        DEPLOY_VERSION="'${DEPLOYMENT_VERSION}'"
-        echo "🎯 Deploying version $DEPLOY_VERSION to $DEPLOY_TARGET environment (True Blue-Green mode)"
-        
-        # Set version for target environment (True Blue-Green mode)
-        if [ "$DEPLOY_TARGET" = "blue" ]; then
-          export BLUE_VERSION="$DEPLOY_VERSION"
-          echo "BLUE_VERSION=$DEPLOY_VERSION" >> .env
-          echo "🔵 True Blue-Green: Setting BLUE_VERSION=$DEPLOY_VERSION"
+      # Upload deployment package to S3
+      S3_KEY="production/deployment-green-${APPLICATION_VERSION}-${CI_PIPELINE_ID}.zip"
+      aws s3 cp "deployment-${APPLICATION_VERSION}.zip" "s3://${CODEDEPLOY_S3_BUCKET}/${S3_KEY}"
+      
+      # Create CodeDeploy deployment
+      DEPLOYMENT_ID=$(aws deploy create-deployment \
+        --application-name "${CODEDEPLOY_APPLICATION_NAME}" \
+        --deployment-group-name "${CODEDEPLOY_APPLICATION_NAME}-green-dg" \
+        --s3-location bucket="${CODEDEPLOY_S3_BUCKET}",key="${S3_KEY}",bundleType=zip \
+        --description "Green Deploy - Pipeline: ${CI_PIPELINE_ID}, Commit: ${CI_COMMIT_SHORT_SHA}" \
+        --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM \
+        --query 'deploymentId' \
+        --output text)
+      
+      echo "Green deployment created: $DEPLOYMENT_ID"
+      echo "GREEN_DEPLOYMENT_ID=$DEPLOYMENT_ID" > green_deployment.env
+      
+      # Wait for deployment
+      aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+      
+      # Validate deployment
+      STATUS=$(aws deploy get-deployment \
+        --deployment-id "$DEPLOYMENT_ID" \
+        --query 'deploymentInfo.status' \
+        --output text)
+      
+      if [ "$STATUS" = "Succeeded" ]; then
+        echo "✅ Green production deployment completed successfully"
+      else
+        echo "❌ Green deployment failed"
+        exit 1
+      fi
+  artifacts:
+    reports:
+      dotenv: green_deployment.env
+  environment:
+    name: production-green
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Traffic switching - ALB target group management
+switch-traffic-to-blue:
+  stage: switch-traffic
+  image: alpine:latest
+  dependencies:
+    - deploy-to-blue-production
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "Switching traffic to Blue environment..."
+    - |
+      # Get Blue target group ARN
+      BLUE_TG_ARN=$(aws elbv2 describe-target-groups \
+        --names "${BLUE_TARGET_GROUP}" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text)
+      
+      # Check target group health
+      HEALTHY_TARGETS=$(aws elbv2 describe-target-health \
+        --target-group-arn "$BLUE_TG_ARN" \
+        --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+        --output text)
+      
+      if [ "$HEALTHY_TARGETS" -lt 1 ]; then
+        echo "❌ No healthy targets in Blue target group"
+        exit 1
+      fi
+      
+      echo "✅ Found $HEALTHY_TARGETS healthy targets in Blue target group"
+      
+      # Switch ALB listener to Blue target group
+      aws elbv2 modify-listener \
+        --listener-arn "${ALB_LISTENER_ARN}" \
+        --default-actions Type=forward,TargetGroupArn="$BLUE_TG_ARN"
+      
+      echo "✅ Traffic switched to Blue environment"
+      
+      # Verify switch
+      sleep 5
+      CURRENT_TG=$(aws elbv2 describe-listeners \
+        --listener-arns "${ALB_LISTENER_ARN}" \
+        --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
+        --output text)
+      
+      if [ "$CURRENT_TG" = "$BLUE_TG_ARN" ]; then
+        echo "✅ Traffic switch verified"
+      else
+        echo "❌ Traffic switch verification failed"
+        exit 1
+      fi
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+switch-traffic-to-green:
+  stage: switch-traffic
+  image: alpine:latest
+  dependencies:
+    - deploy-to-green-production
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "Switching traffic to Green environment..."
+    - |
+      # Get Green target group ARN
+      GREEN_TG_ARN=$(aws elbv2 describe-target-groups \
+        --names "${GREEN_TARGET_GROUP}" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text)
+      
+      # Check target group health
+      HEALTHY_TARGETS=$(aws elbv2 describe-target-health \
+        --target-group-arn "$GREEN_TG_ARN" \
+        --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+        --output text)
+      
+      if [ "$HEALTHY_TARGETS" -lt 1 ]; then
+        echo "❌ No healthy targets in Green target group"
+        exit 1
+      fi
+      
+      # Switch traffic
+      aws elbv2 modify-listener \
+        --listener-arn "${ALB_LISTENER_ARN}" \
+        --default-actions Type=forward,TargetGroupArn="$GREEN_TG_ARN"
+      
+      echo "✅ Traffic switched to Green environment"
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Validation stage - Comprehensive deployment validation
+validate-deployment:
+  stage: validate
+  image: alpine:latest
+  dependencies:
+    - switch-traffic-to-blue
+    - switch-traffic-to-green
+  rules:
+    - if: '$CI_JOB_STAGE == "switch-traffic" && $CI_JOB_STATUS == "success"'
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "Validating deployment..."
+    - |
+      # Wait for ALB to propagate changes
+      sleep 30
+      
+      # Test ALB health endpoint
+      for i in {1..5}; do
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS_NAME}/health/deep" || echo "000")
+      
+        if [ "$HTTP_STATUS" = "200" ]; then
+          echo "✅ ALB health check passed (attempt $i)"
+          break
         else
-          export GREEN_VERSION="$DEPLOY_VERSION"
-          echo "GREEN_VERSION=$DEPLOY_VERSION" >> .env
-          echo "🟢 True Blue-Green: Setting GREEN_VERSION=$DEPLOY_VERSION"
-        fi
-        
-        # Ensure deployment metadata directory exists
-        mkdir -p deployment_state
-        
-        # Install Docker if needed
-        if ! command -v docker &> /dev/null; then
-          echo "📦 Installing Docker..."
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          sudo usermod -aG docker ubuntu
-          sudo systemctl start docker
-          sudo systemctl enable docker
-        fi
-        
-        # Ensure Docker permissions and restart if needed
-        sudo usermod -aG docker ubuntu
-        sudo systemctl restart docker
-        sudo chmod 666 /var/run/docker.sock || true
-        newgrp docker || true
-        
-        # Install debugging tools
-        sudo apt-get update -qq >/dev/null 2>&1 || true
-        sudo apt-get install -y netcat-openbsd net-tools >/dev/null 2>&1 || true
-        
-        # Install Docker Compose if needed
-        if ! command -v docker-compose &> /dev/null; then
-          echo "📦 Installing Docker Compose..."
-          sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-          sudo chmod +x /usr/local/bin/docker-compose
-          sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-        fi
-        
-        # Verify Docker is accessible
-        echo "🔍 Verifying Docker access..."
-        if ! docker ps >/dev/null 2>&1 && ! sudo docker ps >/dev/null 2>&1; then
-          echo "❌ Docker is not accessible. Please check Docker installation and permissions."
-          exit 1
-        fi
-        
-        # Check if system is already running
-        if docker ps --filter "name=nginx-proxy" --format "table {{.Names}}" | grep -q nginx-proxy; then
-          echo "✅ System is running - deploying to inactive $DEPLOY_TARGET environment"
-          
-          # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
-          echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
-          
-          # Check if API server needs rebuild (only if unhealthy)
-          API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
-          if [ "$API_STATUS" != "healthy" ]; then
-            echo "🔧 API server unhealthy, rebuilding..."
-            docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
-            docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
-          else
-            echo "✅ API server healthy, skipping rebuild"
-          fi
-          
-          # Rebuild ONLY target application environment (True Blue-Green)
-          echo "🎯 Rebuilding ONLY $DEPLOY_TARGET application environment..."
-          docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml build ${DEPLOY_TARGET}-app
-          docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app || sudo docker-compose -f docker-compose.yml up -d --no-deps ${DEPLOY_TARGET}-app
-          
-          echo "⏳ Waiting for API server and $DEPLOY_TARGET environment to be ready..."
-          sleep 45  # Extended wait time for API server + target environment startup
-          
-          # Verify API server is accessible with new implementation
-          echo "🔍 Verifying API server accessibility..."
-          for attempt in $(seq 1 10); do
-            if docker run --rm --network bluegreen-network curlimages/curl:latest curl -s --max-time 3 "http://api-server:9000/health" >/dev/null; then
-              echo "✅ API server is responsive (attempt $attempt/10)"
-              break
-            else
-              echo "⏳ API server not ready yet (attempt $attempt/10)..."
-              sleep 5
-            fi
-            if [ $attempt -eq 10 ]; then
-              echo "❌ API server failed to become ready after 10 attempts"
-              echo "🔍 Container status:"
-              docker ps --filter "name=api-server"
-              echo "🔍 API server logs:"
-              docker logs api-server --tail 50 || true
-              exit 1
-            fi
-          done
-          
-        else
-          echo "🏗️  Initial system deployment - starting all services"
-          
-          # Initialize active.env for first deployment (True Blue-Green setup)
-          if [ ! -f "conf.d/active.env" ]; then
-            echo "🔧 Initializing active.env for first deployment..."
-            echo "set \$active \"green\";" > conf.d/active.env
-            echo "✅ Created initial active.env with green environment"
-          else
-            echo "ℹ️  active.env already exists, preserving current configuration"
-          fi
-          
-          docker-compose -f docker-compose.yml down --timeout 10 || sudo docker-compose -f docker-compose.yml down --timeout 10 || true
-          docker-compose -f docker-compose.yml build || sudo docker-compose -f docker-compose.yml build
-          docker-compose -f docker-compose.yml up -d || sudo docker-compose -f docker-compose.yml up -d
-          
-          echo "⏳ Waiting for all services to be ready (t2.micro needs more time)..."
-          sleep 120
-          
-          # 상세 디버깅 정보 수집
-          echo "🔍 [DEBUG] Container status check:"
-          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-          
-          echo "🔍 [DEBUG] Network information:"
-          docker network ls
-          docker network inspect bluegreen-network | jq ".[0].Containers" || true
-          
-          echo "🔍 [DEBUG] System resource usage:"
-          free -h || true
-          df -h || true
-        fi
-        
-        # Enhanced Docker-native health checking with internal network validation
-        echo "🏥 Health checking deployed $DEPLOY_TARGET environment with Docker-native methods..."
-        TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
-        APP_CONTAINER="${DEPLOY_TARGET}-app"
-        
-        # Helper function: Get Docker health status
-        get_docker_health_status() {
-          if docker inspect --format='{{json .State.Health}}' "$1" >/dev/null 2>&1; then
-            docker inspect --format='{{.State.Health.Status}}' "$1" 2>/dev/null || echo "no-health"
-          else
-            echo "no-health"
-          fi
-        }
-        
-        # Helper function: Internal container health check
-        app_internal_health_check() {
-          docker exec "$APP_CONTAINER" sh -c "curl -sS -f --max-time 5 http://localhost:$TARGET_PORT/health >/dev/null" 2>/dev/null
-          return $?
-        }
-        
-        # Helper function: Network-level health check via ephemeral container
-        network_health_check() {
-          docker run --rm --network bluegreen-network curlimages/curl:latest \
-            -sS -f --max-time 5 "http://${APP_CONTAINER}:${TARGET_PORT}/health" >/dev/null 2>/dev/null
-          return $?
-        }
-        
-        # Enhanced health check loop with exponential backoff
-        for attempt in $(seq 1 40); do
-          echo "🔍 Health check attempt $attempt/40 for $DEPLOY_TARGET (container: $APP_CONTAINER)"
-          
-          # Priority 1: Check Docker-managed health status
-          HEALTH_STATUS=$(get_docker_health_status "$APP_CONTAINER")
-          echo "🔎 Docker Health Status: $HEALTH_STATUS"
-          
-          if [ "$HEALTH_STATUS" = "healthy" ]; then
-            echo "✅ Docker-level health = healthy"
-            
-            # Version verification via internal network
-            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
-            if [ "$DEPLOYED_VERSION" != "unknown" ]; then
-              echo "📋 Deployed version: $DEPLOYED_VERSION"
-              DEPLOYMENT_ID=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .deployment_id 2>/dev/null" || echo "unknown")
-              echo "🆔 Deployment ID: $DEPLOYMENT_ID"
-            fi
-            break
-          fi
-          
-          # Priority 2: Internal container health check
-          echo "🔍 Trying internal container health check (docker exec)..."
-          if app_internal_health_check; then
-            echo "✅ Internal container health check passed"
-            
-            # Version verification
-            DEPLOYED_VERSION=$(docker exec "$APP_CONTAINER" sh -c "curl -s --max-time 3 http://localhost:$TARGET_PORT/version 2>/dev/null | jq -r .version 2>/dev/null" || echo "unknown")
-            echo "📋 Deployed version: $DEPLOYED_VERSION"
-            break
-          fi
-          
-          # Priority 3: Network-level health check via Docker network
-          echo "🔍 Trying network-level health check (ephemeral curl container)..."
-          if network_health_check; then
-            echo "✅ Network-level health check passed"
-            break
-          fi
-          
-          # Enhanced debugging at key intervals
-          if [ $attempt -eq 3 ] || [ $attempt -eq 10 ] || [ $attempt -eq 20 ] || [ $attempt -eq 35 ]; then
-            echo "🔍 [DEBUG] Container status (attempt $attempt):"
-            docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | grep -E "(nginx|${DEPLOY_TARGET}|api)" || true
-            echo "🔍 [DEBUG] Container logs (last 15 lines):"
-            docker logs --tail 15 "$APP_CONTAINER" 2>&1 | head -20 || echo "❌ No logs for $APP_CONTAINER"
-            echo "🔍 [DEBUG] Container inspect state:"
-            docker inspect --format='{{json .State}}' "$APP_CONTAINER" | jq '.Running, .Health.Status, .RestartCount, .ExitCode' 2>/dev/null || echo "❌ Inspect failed"
-            echo "🔍 [DEBUG] Network connectivity test:"
-            docker exec "$APP_CONTAINER" sh -c "netstat -tulpn 2>/dev/null | grep :$TARGET_PORT || echo 'Port not bound inside container'"
-          fi
-          
-          # Final attempt failure handling
-          if [ $attempt -eq 40 ]; then
-            echo "❌ $DEPLOY_TARGET environment failed to become healthy after $attempt attempts"
-            echo "🔍 [FINAL DEBUG] Complete diagnostic information:"
-            docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
-            echo "📋 Final container logs:"
-            docker logs --tail 50 "$APP_CONTAINER" 2>&1 || echo "No $APP_CONTAINER logs"
-            docker logs --tail 20 api-server 2>&1 || echo "No api-server logs"  
-            docker logs --tail 20 nginx-proxy 2>&1 || echo "No nginx-proxy logs"
-            echo "🔍 Final network and process state:"
-            docker exec "$APP_CONTAINER" sh -c "ps aux; echo '---'; netstat -tulpn" 2>/dev/null || echo "Cannot access container internals"
+          echo "❌ ALB health check failed: HTTP $HTTP_STATUS (attempt $i/5)"
+          if [ "$i" -eq 5 ]; then
             exit 1
           fi
-          
-          # Exponential backoff: progressively increase wait time
-          sleep_duration=$(( 3 + attempt * 2 ))
-          if [ $sleep_duration -gt 30 ]; then sleep_duration=30; fi
-          echo "⏳ Waiting ${sleep_duration}s before next attempt (progressive backoff)..."
-          sleep "$sleep_duration"
-        done
-        
-        echo "🎉 Inactive environment deployment completed successfully with version tracking!"
-      '
-
-# 5. Health Check Inactive Environment
-health-check-inactive-environment:
-  stage: health-check-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["deploy-to-inactive-environment"]
-  retry: 2
-  script:
-    - echo "🏥 Comprehensive Docker-native health check of inactive environment..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        echo "🎯 Health checking $DEPLOY_TARGET environment using Docker-native methods..."
-        
-        APP_CONTAINER="${DEPLOY_TARGET}-app"
-        TARGET_PORT=$(if [ "$DEPLOY_TARGET" = "blue" ]; then echo "3001"; else echo "3002"; fi)
-        
-        # Enhanced service health check with multiple validation layers
-        check_service_enhanced() {
-          local service_name="$1"
-          local container_name="$2"
-          local internal_port="$3"
-          local proxy_url="$4"
-          local max_attempts=12
-          
-          echo "🔍 Enhanced health check for $service_name (container: $container_name)..."
-          
-          for attempt in $(seq 1 $max_attempts); do
-            echo "🔍 Attempt $attempt/$max_attempts for $service_name"
-            
-            # Method 1: Docker health status (if available)
-            if docker inspect --format="{{.State.Health.Status}}" "$container_name" 2>/dev/null | grep -q "healthy"; then
-              echo "✅ $service_name: Docker health status = healthy"
-              return 0
-            fi
-            
-            # Method 2: Internal container health check
-            if [ -n "$internal_port" ] && docker exec "$container_name" sh -c "curl -sS -f --max-time 3 http://localhost:$internal_port/health >/dev/null" 2>/dev/null; then
-              echo "✅ $service_name: Internal health check passed"
-              return 0
-            fi
-            
-            # Method 3: Network-level health check via ephemeral container
-            if docker run --rm --network bluegreen-network curlimages/curl:latest -sS -f --max-time 3 "http://$container_name:$internal_port/health" >/dev/null 2>/dev/null; then
-              echo "✅ $service_name: Network-level health check passed"
-              return 0
-            fi
-            
-            # Method 4: Proxy-based health check (fallback for NGINX routing validation)
-            if [ -n "$proxy_url" ] && curl -sS -f --max-time 3 "$proxy_url" >/dev/null 2>/dev/null; then
-              echo "✅ $service_name: Proxy-based health check passed"
-              return 0
-            fi
-            
-            # Progressive wait with exponential backoff
-            wait_time=$(( 2 + attempt ))
-            if [ $wait_time -gt 15 ]; then wait_time=15; fi
-            echo "⏳ $service_name not ready, waiting ${wait_time}s... ($attempt/$max_attempts)"
-            sleep "$wait_time"
-          done
-          
-          echo "❌ $service_name health check failed after $max_attempts attempts"
-          return 1
-        }
-        
-        # Check core services with enhanced validation
-        overall_status=0
-        
-        # Check target environment (blue or green) with comprehensive validation
-        echo "🎯 Checking target environment: $DEPLOY_TARGET"
-        if ! check_service_enhanced "$DEPLOY_TARGET Server" "$APP_CONTAINER" "$TARGET_PORT" "http://localhost/$DEPLOY_TARGET/health"; then
-          overall_status=1
+          sleep 10
         fi
-        
-        # Check NGINX proxy with internal and external validation
-        echo "🌐 Checking NGINX Proxy"
-        if ! check_service_enhanced "NGINX Proxy" "nginx-proxy" "" "http://localhost:80/health"; then
-          echo "⚠️ NGINX proxy health check failed, but continuing..."
-          # Note: Not failing overall status for NGINX as it might have different health endpoint behavior
-        fi
-        
-        # Check API Server with internal-only validation (not exposed externally)
-        echo "🔌 Checking API Server (internal access only)"
-        api_status=0
-        if docker exec api-server sh -c "curl -sS -f --max-time 5 http://localhost:9000/health >/dev/null" 2>/dev/null; then
-          echo "✅ API Server: Internal health check passed"
-        elif docker run --rm --network bluegreen-network curlimages/curl:latest -sS -f --max-time 5 "http://api-server:9000/health" >/dev/null 2>/dev/null; then
-          echo "✅ API Server: Network-level health check passed"
-        else
-          echo "❌ API Server health check failed"
-          api_status=1
-        fi
-        
-        # Enhanced debugging information
-        if [ $overall_status -ne 0 ] || [ $api_status -ne 0 ]; then
-          echo "🔍 [DEBUG] System diagnostic information:"
-          docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | grep -E "(nginx|${DEPLOY_TARGET}|api)"
-          echo "🔍 [DEBUG] Container health states:"
-          for container in nginx-proxy "$APP_CONTAINER" api-server; do
-            if docker ps --format "{{.Names}}" | grep -q "^$container\$"; then
-              health_status=$(docker inspect --format="{{.State.Health.Status}}" "$container" 2>/dev/null || echo "no-healthcheck")
-              running_status=$(docker inspect --format="{{.State.Running}}" "$container" 2>/dev/null || echo "unknown")
-              echo "  $container: Running=$running_status, Health=$health_status"
-            fi
-          done
-          
-          echo "🔍 [DEBUG] Recent container logs:"
-          docker logs --tail 10 "$APP_CONTAINER" 2>&1 | head -15 || echo "No logs for $APP_CONTAINER"
-          docker logs --tail 10 nginx-proxy 2>&1 | head -15 || echo "No logs for nginx-proxy"
-        fi
-        
-        # Final status evaluation
-        if [ $overall_status -eq 0 ]; then
-          if [ $api_status -eq 0 ]; then
-            echo "🎉 All services are healthy - ready for traffic switch!"
-          else
-            echo "⚠️ Target environment is healthy but API server has issues - proceeding with caution"
-          fi
-        else
-          echo "❌ Health check failed - deployment cannot proceed"
-          echo "🔍 Final container states:"
-          docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
-          exit 1
-        fi
-      '
-
-# 6. Zero-Downtime Test (Critical Validation).
-zero-downtime-validation:
-  stage: zero-downtime-test-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["health-check-inactive-environment"]
-  script:
-    - echo "🧪 Running zero-downtime deployment validation..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        echo "🚀 Starting zero-downtime test before traffic switch..."
+      done
       
-        # Quick availability test
-        echo "📊 Testing current service availability..."
-        for i in $(seq 1 30); do
-          if ! curl -f --max-time 2 "http://localhost:80/status" >/dev/null 2>&1; then
-            echo "❌ Service availability test failed"
-            exit 1
-          fi
-          sleep 1
-        done
+      # Test application content
+      RESPONSE=$(curl -s "http://${ALB_DNS_NAME}/" || echo "ERROR")
+      if echo "$RESPONSE" | grep -q "True Blue-Green Deployment"; then
+        echo "✅ Application content validation passed"
+      else
+        echo "❌ Application content validation failed"
+        exit 1
+      fi
       
-        echo "✅ Service is stable and ready for traffic switch"
-      '
+      echo "✅ Deployment validation completed successfully"
 
-# 7. Switch Traffic (Manual Approval Required).
-switch-traffic-to-inactive:
-  stage: switch-traffic-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["zero-downtime-validation"]
-  environment:
-    name: production-dev
-    url: "http://$DEPLOY_SERVER_DEV"
-  when: manual
-  allow_failure: false
-  script:
-    - echo "🔄 ZERO-DOWNTIME TRAFFIC SWITCH - Manual approval granted"
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        
-        echo "🚦 Switching traffic to $DEPLOY_TARGET environment (True Blue-Green mode)..."
-        
-        # Debug: Check API server status first
-        echo "🔍 Debugging API server status..."
-        echo "📊 Current container status:"
-        docker ps --filter "name=api-server" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-        
-        echo "🔍 Testing API server connectivity..."
-        api_health=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-          curl -s --max-time 5 "http://api-server:9000/health" 2>/dev/null || echo "API_UNREACHABLE")
-        echo "📊 API health response: $api_health"
-        
-        # Execute traffic switch via API - using Docker internal network
-        echo "🔄 Executing switch command..."
-        switch_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-          curl -s -X POST "http://api-server:9000/switch/$DEPLOY_TARGET" 2>/dev/null || echo "{\"success\":false,\"error\":\"network_call_failed\"}")
-        
-        echo "📊 Raw switch response: $switch_response"
-        
-        if echo "$switch_response" | jq -e ".success" >/dev/null 2>&1; then
-          echo "✅ Traffic successfully switched to $DEPLOY_TARGET"
-          echo "📊 Switch details: $switch_response"
-        else
-          echo "❌ Traffic switch failed: $switch_response"
-          exit 1
-        fi
-        
-        # Verify switch
-        sleep 5
-        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
-          echo "✅ Traffic switch verification successful"
-        else
-          echo "❌ Traffic switch verification failed"
-          exit 1
-        fi
-      '
-
-# 8. Deployment Verification.
-verify-deployment:
-  stage: verify-deployment-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["switch-traffic-to-inactive"]
-  script:
-    - echo "🔍 Verifying zero-downtime deployment completion..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        
-        echo "📊 Post-deployment verification..."
-        
-        # Extended availability test
-        failed_checks=0
-        total_checks=50
-        
-        for i in $(seq 1 $total_checks); do
-          if ! curl -f --max-time 3 "http://localhost:80/status" >/dev/null 2>&1; then
-            failed_checks=$((failed_checks + 1))
-          fi
-          sleep 1
-        done
-        
-        availability=$(echo "scale=2; (1 - $failed_checks/$total_checks) * 100" | bc -l || echo "100")
-        
-        echo "📈 Deployment verification results:"
-        echo "   - Total checks: $total_checks"
-        echo "   - Failed checks: $failed_checks"
-        echo "   - Availability: ${availability}%"
-        
-        if [ "$failed_checks" -eq 0 ]; then
-          echo "🎉 ZERO-DOWNTIME DEPLOYMENT SUCCESSFUL!"
-          echo "✅ Perfect availability achieved: 100%"
-        elif [ "$failed_checks" -le 2 ]; then
-          echo "⚠️  Deployment completed with minor issues"
-          echo "   Availability: ${availability}%"
-        else
-          echo "❌ Deployment verification failed"
-          echo "   Too many availability issues detected"
-          exit 1
-        fi
-      '
-
-# 9. Cleanup Previous Environment (Manual).
-cleanup-previous-environment:
-  stage: cleanup-dev
-  image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  needs: ["verify-deployment"]
-  when: manual
-  allow_failure: true
-  script:
-    - echo "🧹 Safe cleanup - graceful stop and remove previous environment..."
-    - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-
-        echo "🔍 Determine previous active environment..."
-        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
-        echo "Previous active: $PREVIOUS_ACTIVE"
-
-        # Safety check: If previous active equals deploy_target, then no-op
-        DEPLOY_TARGET=$(cat ~/deploy_target.env 2>/dev/null || echo "green")
-        if [ "$PREVIOUS_ACTIVE" = "$DEPLOY_TARGET" ]; then
-          echo "ℹ️  PREVIOUS_ACTIVE equals DEPLOY_TARGET; nothing to cleanup."
-          exit 0
-        fi
-
-        APP_NAME="${PREVIOUS_ACTIVE}-app"
-        echo "🧹 Cleaning up previous app container: $APP_NAME"
-
-        # 1) Find running containers that match the name filter
-        RUNNING_IDS=$(docker ps --filter "name=$APP_NAME" -q || true)
-        if [ -n "$RUNNING_IDS" ]; then
-          echo "⏳ Attempting graceful stop of running containers:"
-          docker ps --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
-          # graceful stop with 30s timeout
-          docker stop --time=30 $RUNNING_IDS || {
-            echo "⚠️ Some containers failed to stop gracefully; attempting forced removal"
-          }
-        fi
-
-        # 2) Remove any containers (running or exited) with this name
-        ALL_IDS=$(docker ps -a --filter "name=$APP_NAME" -q || true)
-        if [ -n "$ALL_IDS" ]; then
-          echo "🗑️ Removing containers (including volumes):"
-          docker ps -a --filter "name=$APP_NAME" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
-          docker rm -v $ALL_IDS || {
-            echo "⚠️ docker rm failed - please inspect"
-          }
-        else
-          echo "ℹ️ No containers found to remove for $APP_NAME"
-        fi
-
-        # 3) Prune dangling images
-        echo "🔍 Pruning dangling images..."
-        docker image prune -f --filter "dangling=true" || true
-
-        echo "🎉 Previous environment cleanup finished."
-      '
-
-# 10. Emergency Rollback (Manual).
+# Rollback stage - Emergency rollback capability
 emergency-rollback:
-  stage: cleanup-dev
+  stage: rollback
   image: alpine:latest
-  <<: [*ssh_setup, *rules_dev_main]
-  when: manual
-  allow_failure: true
-  environment:
-    name: production-dev
-    url: "http://$DEPLOY_SERVER_DEV"
+  before_script:
+    - apk add --no-cache aws-cli
   script:
-    - echo "🚨 EMERGENCY ROLLBACK - Immediate traffic restoration"
+    - echo "Performing emergency rollback..."
     - |
-      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
-        cd ~/bgTest/v5ToWindow
-        PREVIOUS_ACTIVE=$(cat ~/current_active.env 2>/dev/null || echo "blue")
-        
-        echo "🔄 Emergency rollback to $PREVIOUS_ACTIVE environment..."
-        
-        # Execute rollback via API - using Docker internal network
-        rollback_response=$(docker run --rm --network bluegreen-network curlimages/curl:latest \
-          curl -s -X POST "http://api-server:9000/switch/$PREVIOUS_ACTIVE" 2>/dev/null || echo "{\"success\":false}")
-        
-        if echo "$rollback_response" | jq -e ".success" >/dev/null 2>&1; then
-          echo "✅ Emergency rollback successful - traffic restored to $PREVIOUS_ACTIVE"
-        else
-          echo "❌ Emergency rollback failed - manual intervention required"
-          exit 1
+      if [ -n "$DEPLOYMENT_ID" ]; then
+        echo "Rolling back CodeDeploy deployment: $DEPLOYMENT_ID"
+        aws deploy stop-deployment \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --auto-rollback-enabled
+      
+        echo "Rollback initiated"
+      else
+        echo "No deployment ID found for rollback"
+        exit 1
+      fi
+  environment:
+    name: production-active
+    url: http://${ALB_DNS_NAME}
+  when: manual
+  only:
+    - main
+
+# Utility jobs for monitoring and management
+show-infrastructure-status:
+  stage: validate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache aws-cli curl jq
+  script:
+    - echo "=== Infrastructure Status ==="
+    - |
+      # Show ALB status
+      echo "ALB Status:"
+      aws elbv2 describe-load-balancers \
+        --names "bluegreen-deployment-production-alb" \
+        --query 'LoadBalancers[0].{DNSName:DNSName,State:State.Code}' \
+        --output table || echo "ALB not found"
+      
+      # Show target group health
+      echo "Blue Target Group Health:"
+      aws elbv2 describe-target-health \
+        --target-group-arn $(aws elbv2 describe-target-groups --names "${BLUE_TARGET_GROUP}" --query 'TargetGroups[0].TargetGroupArn' --output text) \
+        --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State,Description:TargetHealth.Description}' \
+        --output table || echo "Blue TG not found"
+      
+      echo "Green Target Group Health:"
+      aws elbv2 describe-target-health \
+        --target-group-arn $(aws elbv2 describe-target-groups --names "${GREEN_TARGET_GROUP}" --query 'TargetGroups[0].TargetGroupArn' --output text) \
+        --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State,Description:TargetHealth.Description}' \
+        --output table || echo "Green TG not found"
+  when: manual
+  only:
+    - main
+
+# Cleanup old artifacts
+cleanup-s3-artifacts:
+  stage: validate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache aws-cli
+  script:
+    - echo "Cleaning up old S3 artifacts..."
+    - |
+      # Keep only last 10 deployment packages
+      aws s3api list-objects-v2 \
+        --bucket "${CODEDEPLOY_S3_BUCKET}" \
+        --prefix "production/" \
+        --query 'sort_by(Contents, &LastModified)[:-10].[Key]' \
+        --output text | \
+      while read -r key; do
+        if [ -n "$key" ]; then
+          aws s3 rm "s3://${CODEDEPLOY_S3_BUCKET}/$key"
+          echo "Deleted: $key"
         fi
-        
-        # Verify rollback
-        if curl -f "http://localhost:80/status" >/dev/null 2>&1; then
-          echo "✅ Rollback verification successful"
-        else
-          echo "❌ Rollback verification failed"
-        fi
-      '
+      done
+      
+      echo "S3 cleanup completed"
+  when: manual
+  only:
+    - main
