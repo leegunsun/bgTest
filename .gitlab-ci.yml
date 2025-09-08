@@ -17,6 +17,7 @@ stages:
   - switch-traffic-dev
   - verify-deployment-dev
   - cleanup-dev
+  - api-management-dev
 
 # Common variables
 variables:
@@ -249,14 +250,14 @@ deploy-to-inactive-environment:
           # TRUE ZERO-DOWNTIME DEPLOYMENT - TARGET CONTAINER ONLY
           echo "🔄 Zero-downtime deployment to $DEPLOY_TARGET environment..."
           
-          # Check if API server needs rebuild (only if unhealthy)
+          # Check API server health but DO NOT rebuild during zero-downtime deployment
           API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api-server 2>/dev/null || echo "unhealthy")
           if [ "$API_STATUS" != "healthy" ]; then
-            echo "🔧 API server unhealthy, rebuilding..."
-            docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
-            docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
+            echo "⚠️ API server unhealthy, but preserving for zero-downtime deployment"
+            echo "   API server status: $API_STATUS"
+            echo "   Note: API server issues should be handled separately, not during app deployment"
           else
-            echo "✅ API server healthy, skipping rebuild"
+            echo "✅ API server healthy, continuing with deployment"
           fi
           
           # Rebuild ONLY target application environment (True Blue-Green)
@@ -768,4 +769,53 @@ emergency-rollback:
         else
           echo "❌ Rollback verification failed"
         fi
+      '
+
+# 11. API Server Management (Separate from deployment)
+api-server-management:
+  stage: api-management-dev
+  image: alpine:latest
+  <<: [*ssh_setup, *rules_dev_main]
+  when: manual
+  allow_failure: true
+  script:
+    - echo "🔧 API Server Management - Independent from Blue-Green deployment"
+    - |
+      ssh "ubuntu@$DEPLOY_SERVER_DEV" '
+        cd ~/bgTest/v5ToWindow
+        
+        echo "📊 API Server Health Check..."
+        API_STATUS=$(docker inspect --format="{{.State.Health.Status}}" api-server 2>/dev/null || echo "not-found")
+        
+        if [ "$API_STATUS" = "healthy" ]; then
+          echo "✅ API server is healthy - no action needed"
+          exit 0
+        fi
+        
+        echo "⚠️ API server status: $API_STATUS"
+        echo "🔄 Rebuilding API server independently..."
+        
+        # Rebuild API server without affecting Blue-Green environments
+        docker-compose -f docker-compose.yml build api-server || sudo docker-compose -f docker-compose.yml build api-server
+        docker-compose -f docker-compose.yml up -d --no-deps api-server || sudo docker-compose -f docker-compose.yml up -d --no-deps api-server
+        
+        # Wait for API server to be ready
+        echo "⏳ Waiting for API server to become healthy..."
+        for attempt in $(seq 1 20); do
+          API_STATUS=$(docker inspect --format="{{.State.Health.Status}}" api-server 2>/dev/null || echo "unhealthy")
+          if [ "$API_STATUS" = "healthy" ]; then
+            echo "✅ API server is now healthy"
+            break
+          fi
+          echo "   Attempt $attempt/20: API server status = $API_STATUS"
+          sleep 5
+        done
+        
+        if [ "$API_STATUS" != "healthy" ]; then
+          echo "❌ API server failed to become healthy after rebuild"
+          docker logs --tail 50 api-server
+          exit 1
+        fi
+        
+        echo "🎉 API server management completed successfully"
       '
