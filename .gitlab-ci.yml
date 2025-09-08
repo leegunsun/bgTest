@@ -117,14 +117,9 @@ pre-deployment-validation:
         # Validation 1: System Resource Check
         echo "🔍 Validation 1: System Resources"
         
-        # Memory check - Simplified approach to avoid YAML quoting issues
-        MEMORY_TOTAL=$(free -m | awk 'NR==2{print $2}')
-        MEMORY_AVAILABLE=$(free -m | awk 'NR==2{print $7}')
-        MEMORY_FREE=$(echo "scale=0; $MEMORY_AVAILABLE * 100 / $MEMORY_TOTAL" | bc -l 2>/dev/null || echo "50")
-        
-        # Disk check - Simplified approach
-        DISK_USAGE=$(df -h / | awk 'NR==2{print $5}' | sed 's/%//')
-        DISK_FREE=$(echo "100 - $DISK_USAGE" | bc -l 2>/dev/null || echo "50")
+        # Memory check
+        MEMORY_FREE=$(free -m | awk '"'NR==2{printf "%.0f", $7*100/$2}"')
+        DISK_FREE=$(df -h / | awk '"'NR==2{gsub(/%/,"", $5); print 100-$5}"')
         
         echo "   Available Memory: ${MEMORY_FREE}%"
         echo "   Available Disk: ${DISK_FREE}%"
@@ -454,9 +449,9 @@ deploy-to-inactive-environment:
         sudo chmod 666 /var/run/docker.sock || true
         newgrp docker || true
         
-        # Install debugging tools and bc for calculations
+        # Install debugging tools
         sudo apt-get update -qq >/dev/null 2>&1 || true
-        sudo apt-get install -y netcat-openbsd net-tools bc >/dev/null 2>&1 || true
+        sudo apt-get install -y netcat-openbsd net-tools >/dev/null 2>&1 || true
         
         # Install Docker Compose if needed
         if ! command -v docker-compose &> /dev/null; then
